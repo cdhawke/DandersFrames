@@ -127,8 +127,16 @@ do
     -- Floors rather than exact counts: this file is a RULE, and a rule that had
     -- to be re-numbered on every page added would be edited into agreement with
     -- whatever was there. The exact inventory per page is the censuses' job.
-    check(groups > 200, "alignment: the sweep actually read the pages (" .. groups .. " groups)")
-    check(skinned >= 4, "alignment: ...and found the full-width boxes (" .. skinned .. ")")
-    check(chromeless >= 10, "alignment: ...and the bands (" .. chromeless .. ")")
-    check(rows >= 6, "alignment: ...and the control rows (" .. rows .. ")")
+    --
+    -- ⚠ NO FLOOR ON THE FULL-WIDTH BOXES OR THE CONTROL ROWS ANY MORE. Both are
+    -- the row layout's furniture, and every page converted to the collapsible
+    -- cards drops them (a card is neither a skinned box nor a control row), so
+    -- their counts only ever fall now and zero is a legitimate end state. The
+    -- per-site rules above still police every one that is left; `groups` is
+    -- what proves the sweep read the pages.
+    -- ⚠ 150 AND 5, NOT 200 AND 10: once every settings page became cards
+    -- (2026-09-22) the pages hold 179 groups and 7 chromeless bands. Still far
+    -- above what a sweep that silently read nothing would find.
+    check(groups > 150, "alignment: the sweep actually read the pages (" .. groups .. " groups)")
+    check(chromeless >= 5, "alignment: ...and the bands (" .. chromeless .. ")")
 end

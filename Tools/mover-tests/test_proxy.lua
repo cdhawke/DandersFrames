@@ -52,6 +52,9 @@ local function stubFrame()
     function f:GetEffectiveScale() return self._scale end
     function f:SetShown(v) self._shown = v and true or false end
     function f:GetCenter() return 0, 0 end
+    -- The slab's LAST anchor, recorded: where a slab is drawn is only observable
+    -- as the offset it was handed (the stub resolves no geometry).
+    function f:SetPoint(...) self._lastPoint = { ... } end
     -- Real sizes, because the slab layout drops the coords/icon/title below
     -- fixed widths -- a stub that always answered 10 would render every proxy
     -- in its title-only form and the marker checks below would be meaningless.
@@ -86,6 +89,8 @@ local function stubFontString()
     function f:GetText() return self._text end
     function f:GetStringWidth() return 7 * #self._text end
     function f:GetUnboundedStringWidth() return 7 * #self._text end
+    -- Recorded: the chrome scale reaches slab text through SetTextScale.
+    function f:SetTextScale(v) self._textScale = v end
     function f:ClearAllPoints() wipe(self._points) end
     function f:SetPoint(...) self._points[#self._points + 1] = { ... } end
     return f
@@ -124,6 +129,10 @@ NS.UI = {
     GetAccent = function() return { r = 0, g = 0, b = 1 } end,
     CreateElementBackdrop = function() end,
     ApplyPixelBorder = function() end,
+    -- The slab tooltip goes through the kit (never raw GameTooltip); recorded so
+    -- test_mover_tooltips.lua can read what it was handed.
+    ShowTooltip = function(_, owner, spec) NS.UI._lastTip = { owner = owner, spec = spec } end,
+    HideTooltip = function() NS.UI._lastTip = nil end,
     CreateLabel = function(_, _, opts)
         local f = stubFontString()
         if opts and opts.text then f:SetText(opts.text) end
@@ -460,7 +469,9 @@ do
         getPos = function() return { point = "CENTER", x = 0, y = 0 } end,
         onChanged = function() end })
     P:Build()
-    eq(P.proxies["V:preview"].coords:GetText(), "50, 25", "getRect visible while frame hidden: coords, not 'hidden'")
+    -- The RECORD's numbers (0, 0), not the visible rect's centre (50, 25): the
+    -- slab repeats what the panel's X/Y boxes show. See the readout block below.
+    eq(P.proxies["V:preview"].coords:GetText(), "0, 0", "getRect visible while frame hidden: coords, not 'hidden'")
     eq(P.proxies["V:off"].coords:GetText(), NS.L["hidden"], "no getRect + hidden frame still reads 'hidden'")
     P:DestroyAll()
     R:UnregisterAddon("V")
@@ -840,7 +851,10 @@ do
     P:Build()
     local uf = P:GetUnlockFrame()
     check(type(uf._level) == "number" and uf._level >= 100, "overlay: the unlock frame takes a frame level well above UIParent's children")
-    check(P.proxies["LV:a"]._clamped, "slab: clamped to the screen, so the handle can always be reached")
+    -- ☠ NOT client-clamped any more: SetClampedToScreen clamps FULLY, the element
+    -- is only ever clamped loosely, and the two parted company (see the SLAB
+    -- CLAMP PARITY block below).
+    check(not P.proxies["LV:a"]._clamped, "slab: not client-clamped -- it follows the element's own clamp rule")
     -- A zone plate sits at the overlay's own level: one below the slabs, but
     -- never back at 1.
     P:ShowZones(R:Get("LV:a"))
@@ -849,6 +863,82 @@ do
     P:HideZones()
     P:DestroyAll()
     R:UnregisterAddon("LV")
+    R.ready = wasReady
+    NS.Session = nil
+    NS.db = nil
+end
+
+-- ============================================================
+-- COORDS READOUT = THE PANEL'S NUMBERS
+-- The slab used to print its visible rect's CENTRE while the panel's X/Y boxes
+-- print the RECORD (point-relative x/y, or the anchor's offsets). Those differ
+-- whenever the point is not CENTER or the consumer's getRect is offset from its
+-- record -- DF's raid frames sit inside a larger reserved container -- which is
+-- the reported "coordinates on the mover are sometimes wrong, the settings
+-- window's are right". Both now read Solver.Readout.
+-- ============================================================
+do
+    local S = NS.Solver
+    local wasReady = R.ready
+    R.ready = true
+    NS.db = { showHiddenMovers = true, addons = {} }
+    NS.Session = { selected = nil }
+    R:RegisterAddon("RO", { title = "RO" })
+    -- A container whose record places its TOPLEFT, with the visible frames well
+    -- inside it: the DF raid shape.
+    local freePos = { point = "TOPLEFT", x = -412.6, y = 180.4 }
+    R:Register("RO", "free", { title = "f", frame = FakeFrame(960, 540, 400, 300),
+        getRect = function() return { x = -300, y = 90, w = 180, h = 120 } end,
+        getPos = function() return freePos end, onChanged = function() end })
+    local anchoredPos = { point = "CENTER", x = 10, y = 10,
+        anchor = { target = "RO:free", edge = "bottom", align = "start", offsetX = 5.5, offsetY = -3.4 } }
+    R:Register("RO", "child", { title = "c", frame = FakeFrame(960, 540, 50, 20),
+        getRect = function() return { x = 77, y = -33, w = 50, h = 20 } end,
+        getPos = function() return anchoredPos end, onChanged = function() end })
+    P:Build()
+    local fx, fy = S.Readout(freePos)
+    eq(P.proxies["RO:free"].coords:GetText(), string.format("%d, %d", fx, fy), "readout: a free slab quotes Solver.Readout")
+    eq(P.proxies["RO:free"].coords:GetText(), "-413, 180", "readout: ...which is the record, rounded -- not the rect centre (-300, 90)")
+    local ax, ay = S.Readout(anchoredPos)
+    eq(P.proxies["RO:child"].coords:GetText(), string.format("%d, %d", ax, ay), "readout: an anchored slab quotes Solver.Readout")
+    eq(P.proxies["RO:child"].coords:GetText(), "6, -3", "readout: ...which is the anchor offsets, rounded")
+    P:DestroyAll()
+    R:UnregisterAddon("RO")
+    R.ready = wasReady
+    NS.Session = nil
+    NS.db = nil
+end
+
+-- ============================================================
+-- SLAB CLAMP PARITY
+-- The slab is placed by Solver.KeepOnScreen -- the rule an anchored solve gets
+-- -- so it sits exactly on its element whenever any of the element is on
+-- screen. Only an element with NOTHING visible gets a slab pulled back in (the
+-- rescue handle). UIParent is 1920x1080, so the screen is +-960 / +-540.
+-- ============================================================
+do
+    local wasReady = R.ready
+    R.ready = true
+    NS.db = { showHiddenMovers = true, addons = {} }
+    NS.Session = { selected = nil }
+    R:RegisterAddon("CL", { title = "CL" })
+    local function reg(key, rect)
+        R:Register("CL", key, { title = key, frame = FakeFrame(960, 540, rect.w, rect.h),
+            getRect = function() return rect end,
+            getPos = function() return { point = "CENTER", x = rect.x, y = rect.y } end,
+            onChanged = function() end })
+    end
+    reg("over", { x = 900, y = -500, w = 300, h = 200 })   -- hangs off the bottom-right
+    reg("gone", { x = 2000, y = 0, w = 100, h = 40 })     -- nothing on screen
+    P:Build()
+    local over = P.proxies["CL:over"]._lastPoint
+    eq(over[4], 900, "clamp: an overhanging element's slab stays on it (x)")
+    eq(over[5], -500, "clamp: ...and (y) -- the frames and their preview never part")
+    local gone = P.proxies["CL:gone"]._lastPoint
+    eq(gone[4], 960 - 50, "clamp: an element with nothing on screen gets a slab pulled flush to the edge")
+    eq(gone[5], 0, "clamp: ...on the axis that was off only")
+    P:DestroyAll()
+    R:UnregisterAddon("CL")
     R.ready = wasReady
     NS.Session = nil
     NS.db = nil
@@ -963,11 +1053,14 @@ do
     -- ~0.1s in: the consumer's re-registration rebuilds the slabs. The overlay
     -- is left alone -- not cancelled, not hidden, event still registered.
     local cancelsBefore = count(cancelled, uf)
-    local oldSlab = P.proxies["EN:a"]
+    -- Slabs are pooled (see SLAB POOL below), so "remade" is proved by the
+    -- release having reset a state it would otherwise have carried over,
+    -- not by a new object.
+    P.proxies["EN:a"].hovered = true
     R:Register("EN", "b", elDef({ point = "CENTER", x = 200, y = 0 }))
     P:Rebuild(nil)
     check(P.proxies["EN:b"] ~= nil, "rebuild: the new element gets a slab")
-    check(P.proxies["EN:a"] ~= oldSlab, "rebuild: the slabs really were remade")
+    check(P.proxies["EN:a"].hovered ~= true, "rebuild: the slabs really were remade")
     eq(count(cancelled, uf), cancelsBefore, "rebuild: the overlay's entrance is not cancelled")
     check(uf:IsShown(), "rebuild: the overlay stays up")
     eq(count(fadedIn, uf), 1, "rebuild: ...and is not faded in a second time")
@@ -1042,3 +1135,245 @@ do
     NS.db = nil
 end
 
+-- ============================================================
+-- SLAB POOL (memory)
+-- WoW never frees a frame. A slab used to be a brand-new Button (plus nine
+-- regions) on every Build after a DestroyAll/Rebuild and was simply dropped on
+-- Remove -- so every unlock, and every mid-session rebuild (DandersFrames
+-- re-registers its targets on unlock and on every sort), leaked one slab per
+-- element for good. Released slabs now wait in a pool and the next Build takes
+-- them back. Proxy caches CreateFrame at load, so the check is by identity:
+-- every slab on screen after the churn must be one the first session made.
+-- ============================================================
+do
+    local wasReady = R.ready
+    R.ready = true
+    NS.db = { showHiddenMovers = true, addons = {} }
+    NS.Session = { selected = nil }
+    R:RegisterAddon("PL", { title = "PL" })
+    R:Register("PL", "a", elDef({ point = "CENTER", x = 0, y = 0 }))
+    R:Register("PL", "b", elDef({ point = "CENTER", x = 50, y = 0 }))
+    P:Build()                               -- the first session pays for its slabs
+    local known = {}
+    for _, b in pairs(P.proxies) do known[b] = true end
+    local function allKnown()
+        for _, b in pairs(P.proxies) do if not known[b] then return false end end
+        return next(P.proxies) ~= nil
+    end
+    P:DestroyAll()
+
+    for _ = 1, 5 do P:Build(); P:DestroyAll() end
+    P:Build()
+    check(allKnown(), "pool: five lock/unlock cycles make no new slab frames")
+    for _ = 1, 5 do P:Rebuild() end
+    check(allKnown(), "pool: a mid-session rebuild reuses the slabs it tore down")
+
+    -- A reused slab is the NEW element's slab, not a ghost of the old one.
+    P:DestroyAll()
+    R:Unregister("PL", "b")
+    R:Register("PL", "c", elDef({ point = "CENTER", x = 80, y = 0 }))
+    R:Get("PL:c").title = "Cee"
+    P:Build()
+    local c = P.proxies["PL:c"]
+    check(c ~= nil and known[c], "pool: a new element takes a released slab")
+    check(c ~= nil and c.element == R:Get("PL:c"), "pool: ...which carries its new element")
+    eq(c and c.title:GetText(), "Cee", "pool: ...and its new element's title")
+    check(c and c.dragging == false and c.hovered == false, "pool: ...and no drag or hover left over")
+
+    P:DestroyAll()
+    R:UnregisterAddon("PL")
+    R.ready = wasReady
+    NS.Session = nil
+    NS.db = nil
+end
+
+-- ============================================================
+-- REFRESHALL COST (memory)
+-- DragTo calls RefreshAll every rendered frame of a drag. It used to repaint
+-- every slab once PER slab (n*n applyLooks) and each look built a Children()
+-- list just to ask whether it was empty. One repaint now, and no list.
+-- ============================================================
+do
+    local wasReady = R.ready
+    R.ready = true
+    NS.db = { showHiddenMovers = true, addons = {} }
+    NS.Session = { selected = nil }
+    R:RegisterAddon("RA", { title = "RA" })
+    R:Register("RA", "a", elDef({ point = "CENTER", x = 0, y = 0 }))
+    R:Register("RA", "b", elDef({ point = "CENTER", x = 50, y = 0 }))
+    R:Register("RA", "c", elDef({ point = "CENTER", x = 90, y = 0 }))
+    P:Build()
+
+    local highlights, lists = 0, 0
+    local realHighlight, realChildren = P.Highlight, R.Children
+    P.Highlight = function(...) highlights = highlights + 1 return realHighlight(...) end
+    R.Children = function(...) lists = lists + 1 return realChildren(...) end
+    P:RefreshAll()
+    P.Highlight, R.Children = realHighlight, realChildren
+    eq(highlights, 1, "refreshAll: three slabs, ONE repaint")
+    eq(lists, 0, "refreshAll: the slab look builds no Children() list")
+
+    -- HasChildren answers what #Children() > 0 did.
+    R:GetPos(R:Get("RA:b")).anchor = { target = "RA:a" }
+    check(R:HasChildren("RA:a") == true, "hasChildren: an anchored child counts")
+    check(R:HasChildren("RA:c") == false, "hasChildren: ...and none is none")
+    eq(R:HasChildren("RA:a"), #R:Children("RA:a") > 0, "hasChildren: agrees with Children()")
+    R:GetPos(R:Get("RA:b")).anchor = nil
+
+    P:DestroyAll()
+    R:UnregisterAddon("RA")
+    R.ready = wasReady
+    NS.Session = nil
+    NS.db = nil
+end
+
+-- ============================================================
+-- THE SLAB TOOLTIP (placement)
+-- Through the kit, and OFF the slab: below it near the top of the screen,
+-- above it lower down. It used to hang off the slab's right edge on raw
+-- GameTooltip, which the client clamps back over the slab (and the cursor)
+-- near the top or right edge. The rule is the real one, cut out of Core.lua;
+-- test_tooltips_mover.lua pins the rule itself.
+-- ============================================================
+do
+    local core = mover_file_source("Core.lua")
+    local s = core:find("local TIP_GAP", 1, true)
+    local e = s and core:find("\nend", core:find("function NS.TooltipAnchor", s, true), true)
+    check(s ~= nil and e ~= nil, "slab tip: NS.TooltipAnchor can be cut out of Core.lua")
+    local rule = {}
+    if s and e then assert(loadstring("local NS = ...\n" .. core:sub(s, e + 4), "@Core.lua:TooltipAnchor"))(rule) end
+    local prevAnchor = NS.TooltipAnchor
+    NS.TooltipAnchor = rule.TooltipAnchor
+    local wasReady = R.ready
+    R.ready = true
+    NS.db = { showHiddenMovers = true, addons = {} }
+    NS.Session = { selected = nil }
+    R:RegisterAddon("TT", { title = "TT" })
+    R:Register("TT", "a", { title = "Party Frames", frame = FakeFrame(960, 540, 100, 40),
+        getPos = function() return { point = "CENTER", x = 0, y = 0 } end, onChanged = function() end })
+    P:Build()
+    local slab = P.proxies["TT:a"]
+    -- The stub slab has no geometry of its own; give it a centre to be judged by.
+    function slab:GetCenter() return 960, 1000 end
+    NS.UI._lastTip = nil
+    slab:GetScript("OnEnter")(slab)
+    local tip = NS.UI._lastTip
+    check(tip ~= nil, "slab tip: hovering a slab shows its tooltip through the kit")
+    eq(tip and tip.owner, slab, "slab tip: owned by the slab")
+    eq(tip and tip.spec.title, "Party Frames", "slab tip: titled with the element")
+    eq(tip and tip.spec.anchor, "ANCHOR_BOTTOM", "slab tip: near the top of the screen it hangs BELOW the slab")
+    function slab:GetCenter() return 960, 100 end
+    slab:GetScript("OnEnter")(slab)
+    tip = NS.UI._lastTip
+    eq(tip and tip.spec.anchor, "ANCHOR_TOP", "slab tip: low on screen it sits ABOVE the slab -- never on it")
+    local lines = tip and #tip.spec.lines or 0
+    slab:GetScript("OnEnter")(slab)
+    eq(#NS.UI._lastTip.spec.lines, lines, "slab tip: a second hover re-fills the same lines, it does not append")
+    slab:GetScript("OnLeave")(slab)
+    eq(NS.UI._lastTip, nil, "slab tip: leaving hides it through the kit")
+    P:DestroyAll()
+    R:UnregisterAddon("TT")
+    R.ready = wasReady
+    NS.TooltipAnchor = prevAnchor
+    NS.Session = nil
+    NS.db = nil
+end
+
+-- ============================================================
+-- MOVER OPACITY
+-- The slab FILL follows DandersMoverDB.moverOpacity; the outline that carries
+-- selection and hover does not, so a selected slab reads as selected at any
+-- setting. Tester report (alpha.12): the old fixed 0.95 fill hid the frames.
+-- ============================================================
+do
+    local wasReady = R.ready
+    R.ready = true
+    NS.db = { showHiddenMovers = true, addons = {}, moverOpacity = 0.5 }
+    NS.Session = { selected = nil }
+    R:RegisterAddon("OP", { title = "OP" })
+    R:Register("OP", "a", elDef({ point = "CENTER", x = 0, y = 0 }))
+    R:Register("OP", "b", elDef({ point = "CENTER", x = 200, y = 0 }))
+    P:Build()
+    local a, b = P.proxies["OP:a"], P.proxies["OP:b"]
+    local function recordFill(s) function s:SetBackdropColor(r, g, bl, al) self._fill = al end end
+    recordFill(a); recordFill(b)
+
+    P:Highlight(nil)
+    eq(a._fill, 0.5, "opacity: a resting slab's fill is the setting")
+    a.hovered = true
+    P:Highlight(nil)
+    check(a._fill > 0.5 and a._fill <= 1, "opacity: hover lifts the fill a step, so it still stands out")
+    a.hovered = false
+
+    NS.db.moverOpacity = 0.25
+    P:ApplyOpacity()
+    eq(a._fill, 0.25, "opacity: ApplyOpacity repaints every slab live")
+    eq(b._fill, 0.25, "opacity: ...all of them")
+
+    -- Selection is the outline at full white, whatever the fill.
+    NS.Session.selected = "OP:a"
+    P:Highlight("OP:a")
+    local o = a._border
+    check(o and o[1] == 1 and o[2] == 1 and o[3] == 1 and o[4] == 1, "opacity: the selected slab keeps a full-white outline at a faint fill")
+    local rest = b._border
+    check(rest and rest[4] == 1 and rest[1] < 1, "opacity: an unselected slab keeps the neutral hairline, so the two stay distinct")
+    NS.Session.selected = nil
+
+    NS.db.moverOpacity = 0
+    P:ApplyOpacity()
+    eq(a._fill, 0.1, "opacity: clamped to 0.1 -- a slab never vanishes outright")
+    NS.db.moverOpacity = 7
+    P:ApplyOpacity()
+    eq(a._fill, 1, "opacity: clamped to 1 at the top")
+    NS.db.moverOpacity = nil
+    P:ApplyOpacity()
+    eq(a._fill, 0.5, "opacity: saved variables from before the setting read as the 0.5 default")
+
+    P:DestroyAll()
+    R:UnregisterAddon("OP")
+    R.ready = wasReady
+    NS.Session = nil
+    NS.db = nil
+end
+
+-- ============================================================
+-- SLAB TEXT FOLLOWS THE CHROME SCALE
+-- Tester report (alpha.12): the Scale setting sized the strip and the panel
+-- but not the names ("Party Frames") or the coords on the slabs. The slab
+-- itself stays the size of its frame; its title and coords take the scale.
+-- ============================================================
+do
+    local wasReady = R.ready
+    R.ready = true
+    NS.db = { showHiddenMovers = true, addons = {}, scale = 1.3 }
+    NS.Session = { selected = nil }
+    R:RegisterAddon("SC", { title = "SC" })
+    R:Register("SC", "a", elDef({ point = "CENTER", x = 0, y = 0 }))
+    P:Build()
+    local b = P.proxies["SC:a"]
+    eq(b.title._textScale, 1.3, "slab scale: a new slab's title takes the chrome scale")
+    eq(b.coords._textScale, 1.3, "slab scale: ...and so do its coords")
+    local w, h = b:GetWidth(), b:GetHeight()
+
+    NS.db.scale = 0.8
+    b.layoutKey = 99
+    P:ApplyChromeScale()
+    eq(b.title._textScale, 0.8, "slab scale: moving the setting re-scales the title live")
+    eq(b.coords._textScale, 0.8, "slab scale: ...and the coords")
+    check(b.layoutKey ~= 99, "slab scale: ...and the slab re-measures what fits at the new size")
+    eq(b:GetWidth(), w, "slab scale: the slab itself keeps its frame's width")
+    eq(b:GetHeight(), h, "slab scale: ...and height")
+
+    -- A parked slab picks up a scale that moved while it waited in the pool.
+    P:DestroyAll()
+    NS.db.scale = 1.1
+    P:Build()
+    local again = P.proxies["SC:a"]
+    eq(again.title._textScale, 1.1, "slab scale: a slab re-used from the pool takes the current scale")
+
+    P:DestroyAll()
+    R:UnregisterAddon("SC")
+    R.ready = wasReady
+    NS.Session = nil
+    NS.db = nil
+end

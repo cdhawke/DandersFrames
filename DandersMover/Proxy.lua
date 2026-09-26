@@ -14,7 +14,7 @@ local P = { proxies = {}, zones = {}, zoneCount = 0, dragZones = {},
 NS.Proxy = P
 
 local Registry, Solver, UI, L = NS.Registry, NS.Solver, NS.UI, NS.L
-local CreateFrame, UIParent, GetCursorPosition, GameTooltip, C_Timer, GetTime = CreateFrame, UIParent, GetCursorPosition, GameTooltip, C_Timer, GetTime
+local CreateFrame, UIParent, GetCursorPosition, C_Timer, GetTime = CreateFrame, UIParent, GetCursorPosition, C_Timer, GetTime
 local IsShiftKeyDown, IsControlKeyDown, IsAltKeyDown = IsShiftKeyDown, IsControlKeyDown, IsAltKeyDown
 local pairs, ipairs, format, sqrt, max, abs, tsort = pairs, ipairs, string.format, math.sqrt, math.max, math.abs, table.sort
 
@@ -51,7 +51,28 @@ local MIN_PROXY = 24
 local EDGE_W = 3                        -- role-coloured left edge
 local ICON_SZ, LINK_SZ = 16, 12
 local INSET, ITEM = 4, 4                -- slab padding, gap between inline items
-local BODY_ALPHA, HOVER_ALPHA = 0.95, 1
+-- The strip's and the tab's fill. Chrome, not a mover: it does not follow the
+-- Mover Opacity setting below.
+local BODY_ALPHA = 0.95
+-- ---- mover opacity ---------------------------------------------------
+-- A slab's FILL is the only part the Mover Opacity setting (Settings > Editor,
+-- DandersMoverDB.moverOpacity) thins out. Everything that SAYS something stays
+-- at full strength over it: the role edge and dot, the icon, the title and
+-- coords, and the outline that carries selection (white), hover (softer white)
+-- and the pin marker -- so a selected slab reads as selected at any setting.
+-- The old fixed 0.95 fill hid the frames being arranged (tester report,
+-- alpha.12); NS.DEFAULTS.moverOpacity is 0.5. Hover lifts the fill a step so
+-- the slab under the cursor still stands out when the rest are faint.
+local OPACITY_MIN, OPACITY_MAX, OPACITY_FALLBACK = 0.1, 1, 0.5
+local HOVER_LIFT = 0.15
+
+local function slabFillAlpha(hovered)
+    local a = NS.db and NS.db.moverOpacity
+    if type(a) ~= "number" then a = OPACITY_FALLBACK end
+    if a < OPACITY_MIN then a = OPACITY_MIN elseif a > OPACITY_MAX then a = OPACITY_MAX end
+    if hovered then a = a + HOVER_LIFT; if a > 1 then a = 1 end end
+    return a
+end
 local WEIGHT, SEL_WEIGHT = 1, 1         -- outline thickness; selection is colour, not weight
 -- The "a panel is pinned open on this one" marker: the SAME white outline the
 -- selection and hover wear, at a third alpha. 0.4 because it has to sit clearly
@@ -181,7 +202,7 @@ local function onDragStart(self)
     -- commits the start position rather than nil or a previous drag's values.
     self.lastX, self.lastY, self.lastZone = self.startX, self.startY, nil
     self.dragging = true
-    GameTooltip:Hide()
+    UI:HideTooltip()
     NS.Session.selected = el.id            -- select without docking the panel; EndDrag re-docks it
     P:Highlight(el.id)
     -- Only the FOLLOWING panel: it hangs off the slab that is about to move, so
@@ -204,7 +225,10 @@ local function onDragStart(self)
         NS.Grid:SetAxisLock(shift and not ctrl, ctrl and not shift)
         local fx, fy, zone = NS.Session:DragTo(el, nx, ny)
         s:ClearAllPoints(); s:SetPoint("CENTER", UIParent, "CENTER", fx, fy)
-        s.coords:SetText(format("%d, %d", fx, fy))
+        -- The record DragTo just wrote, read like the panel reads it. No new
+        -- allocation over the old line: one format string per frame, as before.
+        local rx, ry = Solver.Readout(Registry:GetPos(el))
+        s.coords:SetText(format("%d, %d", rx, ry))
         P:UpdateZones(fx, fy, zone)
         P:UpdateLegendDodge(fx, fy, s:GetWidth() or 0, s:GetHeight() or 0)
         -- After the SetPoint above, so the tether's slab endpoint has no
@@ -394,7 +418,7 @@ local function applyLook(b, selected, hovered)
     local pos = Registry:GetPos(b.element)
     -- Children() is alias-aware, so a target that resolves to this element's
     -- frame counts too.
-    local isRoot = #Registry:Children(b.element.id) > 0
+    local isRoot = Registry:HasChildren(b.element.id)
     local c = pos.anchor and C_ANCHORED or (isRoot and C_ROOT or C_FREE)
     b.edge:SetColorTexture(c.r, c.g, c.b, 1)
     b.dot:SetVertexColor(c.r, c.g, c.b)
@@ -427,7 +451,7 @@ local function applyLook(b, selected, hovered)
             end
         end
     end
-    b:SetBackdropColor(C_BODY.r, C_BODY.g, C_BODY.b, hovered and HOVER_ALPHA or BODY_ALPHA)
+    b:SetBackdropColor(C_BODY.r, C_BODY.g, C_BODY.b, slabFillAlpha(hovered))
     -- Selection is the OUTLINE, never the fill or the role colour: white and
     -- twice as thick. Hover is a softer white at the same weight, and it stands
     -- down for the selected proxy so hovering cannot make it look less selected.
@@ -450,28 +474,51 @@ local function applyLook(b, selected, hovered)
     end
 end
 
+-- ------------------------------------------------------------
+-- SLAB TEXT SCALE
+-- The title and coords follow the chrome scale (Settings > Scale); the slab
+-- itself, its icon and markers do not -- it is as big as its frame. Through
+-- SetTextScale rather than a sized font: the title keeps its font OBJECT, and
+-- with it the multi-alphabet family an element name in another script needs.
+-- Tester report (alpha.12): "Party Frames" and the coords ignored the setting.
+-- Only touched when the value changes; clearing layoutKey makes the next
+-- layout re-measure what fits at the new size.
+-- ------------------------------------------------------------
+local function applySlabTextScale(b)
+    local s = NS:ChromeScale()
+    if b.textScale == s then return end
+    b.textScale = s
+    if b.title.SetTextScale then b.title:SetTextScale(s) end
+    if b.coords.SetTextScale then b.coords:SetTextScale(s) end
+    b.layoutKey = nil
+end
+
 local function create(el)
     local b = CreateFrame("Button", nil, P:GetUnlockFrame(), "BackdropTemplate")
     -- A solid dark slab with a neutral hairline. The role is carried by the dot
     -- and the left edge ONLY, so the outline is free to mean "selected" and the
     -- body is free to stay readable behind whatever the proxy is sitting on.
     UI:CreateElementBackdrop(b, {
-        bgColor     = { C_BODY.r, C_BODY.g, C_BODY.b, BODY_ALPHA },
+        bgColor     = { C_BODY.r, C_BODY.g, C_BODY.b, slabFillAlpha(false) },
         borderColor = { C_OUTLINE.r, C_OUTLINE.g, C_OUTLINE.b, 1 },
     })
     b.outlineWeight = WEIGHT
     b:RegisterForClicks("LeftButtonUp")
     b:RegisterForDrag("LeftButton")
     b:SetMovable(false)
-    -- ☠ THE HANDLE STAYS ON SCREEN EVEN WHEN ITS ELEMENT DOES NOT. An anchored
-    -- solve can land an element outside the screen (a stale target rect --
-    -- Core's KeepOnScreen only catches the fully-off case), and a slab that
-    -- followed it there could never be clicked to bring it back. Clamped, the
-    -- slab hugs the edge instead; a drag from there re-places the element by the
-    -- cursor (DragTo positions the element at the slab's new centre), which is
-    -- the rescue. Free elements are already clamped by every write path, so the
-    -- slab and the element only ever part company in that one anchored case.
-    b:SetClampedToScreen(true)
+    -- ☠ NO SetClampedToScreen HERE. The slab used to be clamped by the client,
+    -- which clamps FULLY, while the element it stands for is only ever clamped
+    -- loosely (an anchored solve keeps any seat that leaves part of it on
+    -- screen -- Core's KeepOnScreen). So an element overhanging an edge had its
+    -- slab shoved inward, off the frames: the preview sat on screen while the
+    -- frames it described did not, the coords quoted a place nothing was, and
+    -- the FIRST drag "fixed" it -- DragTo starts from the slab's clamped centre
+    -- and moves the element there. syncGeometry now places the slab through
+    -- Solver.KeepOnScreen, the exact rule the element itself gets, so slab and
+    -- element agree whenever any of the element is visible. The one case they
+    -- still part is an element with NOTHING on screen: its slab is pulled to
+    -- the nearest visible spot as the rescue handle, and dragging it re-places
+    -- the element there.
 
     -- Role edge: full height, flush left, and UNDER the pixel border (which draws
     -- at ARTWORK sublevel 7) so the selection outline always reads over it.
@@ -515,6 +562,8 @@ local function create(el)
     -- with the content beside it.
     b.crossH = b:CreateTexture(nil, "OVERLAY"); b.crossH:SetColorTexture(1, 1, 1, 0.25); b.crossH:SetSize(16, 1); b.crossH:SetPoint("CENTER")
     b.crossV = b:CreateTexture(nil, "OVERLAY"); b.crossV:SetColorTexture(1, 1, 1, 0.25); b.crossV:SetSize(1, 16); b.crossV:SetPoint("CENTER")
+    b.textScale = nil
+    applySlabTextScale(b)
     b:SetScript("OnDragStart", onDragStart)
     b:SetScript("OnDragStop", onDragStop)
     b:SetScript("OnClick", onClick)
@@ -526,13 +575,38 @@ local function create(el)
     b:SetScript("OnLeave", function(s)
         s.hovered = false
         P:Highlight(NS.Session and NS.Session.selected)
-        GameTooltip:Hide()
+        UI:HideTooltip()
     end)
     b.element = el
     -- Creation order breaks z-ties in the overlap cycle: at equal frame level
     -- the later-created button renders on top.
     P.createCounter = (P.createCounter or 0) + 1
     b.createIndex = P.createCounter
+    return b
+end
+
+-- ☠ SLABS ARE POOLED, NEVER DROPPED. WoW does not free a frame, so a slab that
+-- Remove let go of was leaked for good -- and every lock, every mid-session
+-- Rebuild (DandersFrames re-registers its anchor targets on unlock and on every
+-- sort) let go of ALL of them, so each unlock added a full set of Buttons plus
+-- their regions that never came back. Remove parks the slab here; acquire hands
+-- it out again and re-points it at its new element. createIndex is kept: it is
+-- the frame's own creation order, which is what breaks the z-tie it stands for.
+local spareSlabs = {}
+
+local function acquire(el)
+    local n = #spareSlabs
+    if n == 0 then return create(el) end
+    local b = spareSlabs[n]
+    spareSlabs[n] = nil
+    b.element = el
+    b.dragging, b.hovered, b.tagShown = false, false, nil
+    -- nil forces layout() to re-anchor and re-title for the new element.
+    b.layoutKey, b.layoutTitle = nil, nil
+    -- The scale may have moved while it sat parked.
+    applySlabTextScale(b)
+    local addon = Registry:GetAddon(el.addon)
+    if b.icon:SetTexture(addon and addon.icon or DEFAULT_ICON) == false then b.icon:SetTexture(DEFAULT_ICON) end
     return b
 end
 
@@ -564,7 +638,7 @@ function P:Build(filter, animate)
         if Registry:WantsProxy(filter, el) then
             local frame = Registry:GetFrame(el)
             if NS.db.showHiddenMovers or (frame and frame:IsShown()) then
-                local b = self.proxies[el.id] or create(el)
+                local b = self.proxies[el.id] or acquire(el)
                 b.element = el
                 self.proxies[el.id] = b
                 self:Refresh(el.id)
@@ -626,7 +700,11 @@ local function syncGeometry(b)
     local cx, cy
     if rect then cx, cy = rect.x, rect.y; w, h = rect.w, rect.h
     else cx, cy = Solver.PointToCenter(pos.point or "CENTER", pos.x or 0, pos.y or 0, w, h) end
-    b:SetSize(math.max(w, MIN_PROXY), math.max(h, MIN_PROXY))
+    w, h = math.max(w, MIN_PROXY), math.max(h, MIN_PROXY)
+    -- The element's own clamp rule, not a harder one: see create().
+    local sw, sh = UIParent:GetWidth(), UIParent:GetHeight()
+    if sw and sh then cx, cy = Solver.KeepOnScreen(cx, cy, w, h, sw, sh) end
+    b:SetSize(w, h)
     b:ClearAllPoints(); b:SetPoint("CENTER", UIParent, "CENTER", cx, cy)
     -- A mover whose element is not on screen has no meaningful position to
     -- report, so the coords slot says so instead of quoting a stale number.
@@ -638,7 +716,15 @@ local function syncGeometry(b)
     local shown = Registry:IsTargetAvailable(el)
     -- Hidden frames keep a full-strength slab; the muted "hidden" word carries
     -- the state on its own.
-    b.coords:SetText(shown and format("%d, %d", cx, cy) or L["hidden"])
+    -- ☠ THE RECORD, NOT THE SLAB'S CENTRE: the same pair the panel's X/Y boxes
+    -- show (Solver.Readout). The centre is a different number whenever the
+    -- record's point is not CENTER or the visible rect is offset from the record.
+    if shown then
+        local rx, ry = Solver.Readout(pos)
+        b.coords:SetText(format("%d, %d", rx, ry))
+    else
+        b.coords:SetText(L["hidden"])
+    end
     return true
 end
 
@@ -664,7 +750,16 @@ function P:Refresh(id)
     self:Highlight(NS.Session and NS.Session.selected)
 end
 
-function P:RefreshAll() for id in pairs(self.proxies) do self:Refresh(id) end end
+-- Every slab re-measured, then ONE repaint -- the SyncMany shape. It used to be
+-- Refresh per slab, and each Refresh repaints EVERY slab, so a drag (DragTo
+-- runs this every frame) painted n*n slabs a frame for the answer one pass gives.
+function P:RefreshAll()
+    local any = false
+    for _, b in pairs(self.proxies) do
+        if syncGeometry(b) then any = true end
+    end
+    if any then self:Highlight(NS.Session and NS.Session.selected) end
+end
 
 -- Is any slab under the cursor right now? Callers that would otherwise put
 -- session chrome back on screen (the panel a drag deliberately hid) ask first.
@@ -680,9 +775,18 @@ function P:Highlight(selectedId)
     self:UpdateTethers()
 end
 
+-- The Mover Opacity setting moved: repaint every slab (applyLook reads it).
+function P:ApplyOpacity()
+    self:Highlight(NS.Session and NS.Session.selected)
+end
+
 function P:Remove(id)
     local b = self.proxies[id]
-    if b then b:Hide(); b:SetScript("OnUpdate", nil); self.proxies[id] = nil end
+    if b then
+        b:Hide(); b:SetScript("OnUpdate", nil); self.proxies[id] = nil
+        NS.Fx.Cancel(b)               -- an entrance still playing must not finish on a parked slab
+        spareSlabs[#spareSlabs + 1] = b
+    end
 end
 
 function P:RemoveAddon(addon)
@@ -939,8 +1043,11 @@ local LEGEND_ROW = 18                    -- first row: dots left, buttons right
 -- One number for everything a session draws that is NOT a slab: the top strip
 -- and its folded tab, the toast, the element panel (Panel.lua) and the settings
 -- window (Settings.lua). A slab is exactly as big as the frame it stands in for,
--- so it never scales -- which is also why the whole overlay cannot simply be
--- scaled: the slabs are its children and are placed in UIParent units.
+-- so the slab itself never scales -- which is also why the whole overlay cannot
+-- simply be scaled: the slabs are its children and are placed in UIParent
+-- units. Its TEXT does: the title and the coords take the scale through
+-- SetTextScale (applySlabTextScale), so the names read at the size the rest of
+-- the chrome was set to.
 -- The mover is standalone, so this is its own setting (DandersMoverDB.scale)
 -- rather than a read of DandersFrames' window scale; a user who wants the two
 -- to match sets this one to match. Owned here, next to the chrome it sizes,
@@ -962,11 +1069,15 @@ local function chromeRatio(f)
     return 1
 end
 
--- The setting moved (Settings > Editor > Scale), or a session opened: size
+-- The setting moved (Settings > Scale, top of the window), or a session opened: size
 -- every piece of chrome that exists. Panel and Settings load after this file,
 -- hence the guards; each owns its own frames.
 function P:ApplyChromeScale()
     local s = NS:ChromeScale()
+    local anySlab = false
+    for _, b in pairs(self.proxies) do applySlabTextScale(b); anySlab = true end
+    -- The text widths changed, so every slab's fit is re-measured in one repaint.
+    if anySlab then self:Highlight(NS.Session and NS.Session.selected) end
     if self.legend then self.legend:SetScale(s) end
     if self.stripTab then self.stripTab:SetScale(s) end
     if self.toast then self.toast:SetScale(s) end
@@ -1287,26 +1398,47 @@ end
 -- ============================================================
 -- TOOLTIP
 -- ============================================================
+-- Through the kit's ShowTooltip (never raw GameTooltip), placed OFF the slab:
+-- below it in the upper half of the screen, above it in the lower half
+-- (NS.TooltipAnchor with `beside`). It used to hang off the slab's right edge,
+-- which the client clamps back over the slab -- and the cursor -- whenever the
+-- slab sits near the right or top edge.
+--
+-- One spec and one set of line tables, refilled per hover: a hover is not a hot
+-- path, but there is no reason for it to build garbage either.
+local tipLines = { {}, {}, " ", {}, {}, {}, {} }
+local tipSpec = { lines = {} }
+local C_TIP_BODY = { r = 0.8, g = 0.8, b = 0.8 }
+
+-- Line i of the pool, refilled, appended as the spec's line n.
+local function tipLine(n, i, text, color)
+    local line = tipLines[i]
+    if type(line) == "table" then line.text, line.color = text, color end
+    tipSpec.lines[n] = line
+    return n + 1
+end
+
 function P:ShowTooltip(b)
     if b.dragging then return end
     local el = b.element
     local addon = Registry:GetAddon(el.addon)
-    GameTooltip:SetOwner(b, "ANCHOR_RIGHT")
-    GameTooltip:AddLine(el.title, 1, 1, 1)
-    GameTooltip:AddLine(addon and addon.title or el.addon, C_MUTED.r, C_MUTED.g, C_MUTED.b)
+    wipe(tipSpec.lines)
+    tipSpec.title = el.title
+    local n = tipLine(1, 1, addon and addon.title or el.addon, C_MUTED)
     local a = Registry:GetPos(el).anchor
     if a then
         local target = Registry:GetTarget(a.target)
         local name = target and target.title or L["(unavailable)"]
         local how = a.mode == "point" and format("%s → %s", a.point, a.relPoint) or format("%s/%s", a.edge, a.align)
-        GameTooltip:AddLine(format(L["Anchored to %s"], format("%s (%s)", name, how)), C_ANCHORED.r, C_ANCHORED.g, C_ANCHORED.b)
+        n = tipLine(n, 2, format(L["Anchored to %s"], format("%s (%s)", name, how)), C_ANCHORED)
     end
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(L["Drag to move. Shift locks to horizontal, Ctrl to vertical."], 0.8, 0.8, 0.8)
-    GameTooltip:AddLine(L["Click to select, arrow keys to nudge (Shift ×10, Ctrl ×100)."], 0.8, 0.8, 0.8)
-    if a then GameTooltip:AddLine(L["Drop into a zone to re-anchor; pull far away or Detach to free it."], 0.8, 0.8, 0.8) end
-    GameTooltip:AddLine(L["Press Esc or use the top strip to lock."], 0.8, 0.8, 0.8)
-    GameTooltip:Show()
+    n = tipLine(n, 3)
+    n = tipLine(n, 4, L["Drag to move. Shift locks to horizontal, Ctrl to vertical."], C_TIP_BODY)
+    n = tipLine(n, 5, L["Click to select, arrow keys to nudge (Shift ×10, Ctrl ×100)."], C_TIP_BODY)
+    if a then n = tipLine(n, 6, L["Drop into a zone to re-anchor; pull far away or Detach to free it."], C_TIP_BODY) end
+    tipLine(n, 7, L["Press Esc or use the top strip to lock."], C_TIP_BODY)
+    tipSpec.anchor, tipSpec.anchorX, tipSpec.anchorY = NS.TooltipAnchor(b, true)
+    UI:ShowTooltip(b, tipSpec)
 end
 
 -- ============================================================

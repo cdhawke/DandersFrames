@@ -37,6 +37,9 @@ local function validate(def, kind)
         if def.twin ~= nil and type(def.twin) ~= "string" then
             error("DandersMover: twin must be an \"addon:key\" string", 3)
         end
+        if def.visibleOffset ~= nil and type(def.visibleOffset) ~= "function" then
+            error("DandersMover: visibleOffset must be a function", 3)
+        end
     end
 end
 
@@ -71,6 +74,9 @@ local function insertElement(self, addon, key, def)
         secure = def.secure and true or false, getSize = def.getSize,
         getRect = def.getRect, anchorable = def.anchorable ~= false, group = def.group,
         isRelevant = def.isRelevant,
+        -- pos -> dx, dy: where the visible rect's centre sits relative to the record
+        -- (Core.lua, RECORD-TO-VISIBLE OFFSET). Optional; nil = centred on it.
+        visibleOffset = def.visibleOffset,
         -- false = the target builds no snap zones; the picker and link-drag still reach
         -- it. The paired insertTarget below gets the same def, so the target copy that
         -- ShowZones reads is stamped there; this copy is for symmetry/introspection.
@@ -426,6 +432,18 @@ function R:ParentId(elId)
     if not el then return nil end
     local a = self:ActiveAnchor(el)
     return a and self:CanonicalId(a.target) or nil
+end
+
+-- "Does anything anchor to this?" without building the list. The slab look
+-- asks it for every slab on every repaint, and a drag repaints every frame, so
+-- the list Children() allocates was pure garbage there.
+function R:HasChildren(targetId)
+    local canon = self:CanonicalId(targetId)
+    for _, el in pairs(self.elements) do
+        local primary, backup = self:ParentIds(el.id)
+        if primary == canon or backup == canon then return true end
+    end
+    return false
 end
 
 function R:Children(targetId)

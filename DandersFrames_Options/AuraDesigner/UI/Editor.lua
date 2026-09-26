@@ -720,13 +720,16 @@ P.CollectLayoutGroupSections = CollectLayoutGroupSections
 --
 -- ☠ A VERB, NOT A FILE-SCOPE TABLE. Every label is an L[...] lookup and a table
 -- built at load freezes on whatever locale was live then -- the trap
--- DF:RegisterLocaleRefresh exists for, and the same reason Cards.lua's
--- AddFlowScopes is a function.
+-- DF:RegisterLocaleRefresh exists for.
 --
--- ⚠ ONE DECLARATION, TWO HOSTS: the split panel's choice-card BLOCK and the
--- popout layout's "+ Add Layout Group" PANEL. A second copy is how the three
--- duplicated FRAME_ITEMS lists in Cards.lua came about.
+-- ⚠ ONE DECLARATION, READ BY ONE PANEL: S.BuildAddLayoutGroupPane below, which
+-- both designers run -- the rows page from its "+ Add Layout Group" row, the
+-- split panel mounted on its Layout Groups tab, where a tile click adds (2026-09-22;
+-- its choice-card block is gone).
 -- ============================================================
+-- ⚠ A nil group is a refused create -- My Buffs with no spec, already said by
+-- CreateLayoutGroup (P.RefuseNoSpecWrite) -- so nothing is expanded or rebuilt.
+-- A created group comes back EXPANDED at the foot of the list.
 local function AddGroupOfKind(kind)
     local group = CreateLayoutGroup(nil, kind)
     if group then
@@ -739,6 +742,8 @@ end
 local function LayoutGroupCards()
     return {
         {
+            -- `key` names the kind, for anything that has to tell the cards apart.
+            key   = "spell",
             title = L["Spell Group"],
             desc  = L["Spells you choose yourself"],
             art   = { kind = "iconRow", ghost = true,
@@ -746,27 +751,14 @@ local function LayoutGroupCards()
             onClick = function() AddGroupOfKind(nil) end,
         },
         {
+            key   = "filter",
             title = L["Filter Group"],
             desc  = L["Follows one of your filters"],
             art   = { kind = "iconRow", ghost = true,
                       colors = { {0.30,0.61,0.36}, {0.30,0.61,0.36}, {0.30,0.61,0.36} } },
             onClick = function() AddGroupOfKind("filter") end,
-            -- The filter card in this block, matching the Effects tab's "From a
-            -- Filter". No filter argument: nothing is chosen until the group
-            -- exists, so this opens the library rather than one filter. Once the
-            -- group HAS links, each chip inside it carries its own pencil.
-            action = {
-                -- ☠ Extension included -- see the matching note on the Effects
-                -- tab's card. A PNG path without ".png" fails silently.
-                icon    = "filter_list.png",
-                tooltip = {
-                    title = L["Manage Filters"],
-                    lines = { L["Build and edit your buff filters in the Filter Designer."] },
-                },
-                onClick = function()
-                    if GUI.OpenFilterInDesigner then GUI:OpenFilterInDesigner() end
-                end,
-            },
+            -- The route to the filter library is the panel's footer
+            -- (BuildFilterFooter below), not a glyph on this card.
         },
     }
 end
@@ -813,6 +805,9 @@ local function PaintIconRowOnThumb(pv, colors, ghost)
         x = x + GROUP_ICON_SIZE + GROUP_ICON_GAP
     end
 end
+-- Published for the classic Effects tab's Add from a Spell / Add from a Filter
+-- tiles (Cards.lua's S.BuildClassicAddTiles), which draw in this same vocabulary.
+P.PaintGroupIconRow = PaintIconRowOnThumb
 
 -- "Create Filter" -- jump to the Filter Designer and pulse its New Filter button.
 -- ☠ ONE DEFINITION. The filter-links section inside a group card had the only
@@ -898,6 +893,21 @@ end
 --   opts.Close()       shut the panel once something has been added
 -- ============================================================
 local GROUP_TILE_PIC_H, GROUP_TILE_GAP = 40, 6
+-- The same numbers for the classic Effects tab's source tiles (Cards.lua's
+-- S.BuildClassicAddTiles), so all three tabs' add tiles are one size.
+P.GroupTileMetrics = { picH = GROUP_TILE_PIC_H, gap = GROUP_TILE_GAP }
+
+-- ── opts.onPage: THE CLASSIC DESIGNER MOUNTS THESE PANES ON ITS TAB ──
+-- The split panel's Layout Groups / Debuffs tabs draw these tiles straight onto
+-- the page, above the list, and a click ADDS (2026-09-22). So there is no numbered
+-- question over them -- the tab heading already says what the tiles are -- and the
+-- tiles are always half the column, one or two of them, so both tabs match.
+--   opts.onPage   no heading; half-column tiles
+--   opts.blocked  the designer is off or the add cannot happen here: the tiles are
+--                 drawn greyed (the caller says why under them)
+--   opts.gate()   asked on every click; false stops the add (and has said why)
+-- ☠ NO CONFIRM STEP. A first pass drew the chosen kind with an Add button under
+-- it; a tile that is already the answer does not need a second click to mean it.
 
 S.BuildAddLayoutGroupPane = function(host, opts)
     opts = opts or {}
@@ -905,8 +915,10 @@ S.BuildAddLayoutGroupPane = function(host, opts)
     local gc = { r = 0.91, g = 0.66, b = 0.25 }  -- Layout Groups tab color
 
     local y = 0
-    CreateNumberedHeading(host, 1, L["WHICH KIND OF GROUP?"], y, W)
-    y = y - 20
+    if not opts.onPage then
+        CreateNumberedHeading(host, 1, L["WHICH KIND OF GROUP?"], y, W)
+        y = y - 20
+    end
 
     local defs = LayoutGroupCards()
     local tileW = floor((W - GROUP_TILE_GAP * (#defs - 1)) / #defs)
@@ -930,11 +942,13 @@ S.BuildAddLayoutGroupPane = function(host, opts)
             -- complete. The one primary button belongs to the panel with three
             -- sections.
             onClick = function()
+                if opts.gate and not opts.gate() then return end
                 if opts.Close then opts.Close() end
                 onPick()
             end,
         })
         tile:SetPoint("TOPLEFT", (i - 1) * (tileW + GROUP_TILE_GAP), y)
+        if opts.blocked then tile:SetTileState("disabled") end
         rowH = max(rowH, tile.layoutHeight or 68)
     end
     y = y - (rowH + 10)
@@ -951,34 +965,30 @@ end
 -- ============================================================
 -- THE LAYOUT GROUPS TAB'S HEAD AREA
 -- ------------------------------------------------------------
--- The teaching sentence, the two choice cards and the "debuff rows live over
--- there" hint -- everything above the list. ONE definition, two hosts: the split
--- panel's own column and the row layout's band, exactly as S.BuildEffectsHeadArea
--- is for the Effects tab.
+-- The Spell Group / Filter Group add tiles, the teaching sentence and the
+-- "debuff rows live over there" hint -- everything above the list. ONE definition,
+-- two hosts: the split panel's own column and the row layout's band, exactly as
+-- S.BuildEffectsHeadArea is for the Effects tab.
 --
--- ⚠ opts.skipAddBlock: THE ROW LAYOUT HAS NO CARD BLOCK ON THE PAGE. Its two
--- cards live in the "+ Add Layout Group" row's panel above this area, exactly as
--- the Effects tab's three scope cards moved into "+ Add Indicator". The split
--- panel keeps the block: it is the one surface with the standing room for it.
+-- ⚠ opts.skipAddBlock: THE ROW LAYOUT HAS ITS OWN "+ Add Layout Group" ROW above
+-- this area, so it asks for no tiles here. Both build the same pane.
 -- ============================================================
 S.BuildLayoutGroupsHeadArea = function(parent, yPos, opts)
     local skipAdd = opts and opts.skipAddBlock or false
-    local gc = { r = 0.91, g = 0.66, b = 0.25 }  -- Layout Groups tab color
 
-    -- The column every object below is anchored 8px inside on both sides -- the
-    -- host's own explicit width less those two insets. Derived rather than read
-    -- off a child, for the reason S.BuildEffectsHeadArea spells out: a child's
-    -- width is not resolved until the layout pass, and the choice cards need a
-    -- number NOW to wrap their descriptions against.
-    local hostW = parent:GetWidth() or 0
-    local COL_W = (hostW > 40) and (hostW - 16) or nil
-
-    -- ⚠ Read BEFORE any chrome is built. An EMPTY tab explains the two kinds
-    -- with choice cards INSTEAD of the compact add buttons and the heading, so
-    -- what gets created depends on the count. A card runs ~2.5x a button's
-    -- height, which this ~260px column can only spare while there is no list
-    -- underneath it -- hence cards or buttons, never both.
+    -- ⚠ Read BEFORE any chrome is built: the teaching sentence and the debuff-rows
+    -- hint are for an EMPTY tab only.
     local hasGroups = #VisibleLayoutGroups() > 0
+
+    -- ── SPELL GROUP / FILTER GROUP ──
+    -- ☠ THE TWO PICTURE TILES, ON THE PAGE, ONE CLICK EACH (2026-09-22). The Modern
+    -- pane (S.BuildAddLayoutGroupPane, opts.onPage) mounted straight onto this tab:
+    -- a tile click creates the group, and the Create / Manage Filters pair sits
+    -- under the tiles -- see Cards.lua's THE CLASSIC DESIGNER'S INLINE ADD FLOWS.
+    -- The rows page has its own row and passes skipAddBlock.
+    if not skipAdd then
+        yPos = S.BuildClassicAddTiles(parent, yPos, "layout")
+    end
 
     -- Teaching prose, first visit only. The CARDS below are pinned permanently --
     -- they are the create action, so they have to be -- but this sentence is read
@@ -992,22 +1002,6 @@ S.BuildLayoutGroupsHeadArea = function(parent, yPos, opts)
         intro:SetText(L["A row of icons that arranges itself as auras come and go."])
         intro:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
         yPos = yPos - 34
-    end
-
-    -- The two kinds, always. These REPLACE the old "+ Create Group" / "+ Filter
-    -- Group" pair rather than sitting above it -- a card is itself the create
-    -- action, and running both would be two paths to the same thing.
-    if not skipAdd then
-        local addBlock = GUI:CreateChoiceCardGroup(parent, {
-            title    = L["ADD A LAYOUT GROUP"],
-            accent   = gc,
-            width    = COL_W,
-            onToggle = function() S.SwitchTab("layout") end,
-            cards    = LayoutGroupCards(),
-        })
-        addBlock:SetPoint("TOPLEFT", 8, yPos)
-        addBlock:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
-        yPos = yPos - (addBlock.layoutHeight + 10)
     end
 
     if not hasGroups then
@@ -1498,6 +1492,7 @@ end
 local function DebuffGroupCards()
     return {
         {
+            key   = "debuff",
             title = L["Debuff Group"],
             desc  = L["Blizzard's debuff categories"],
             art   = { kind = "iconRow", ghost = true,
@@ -1521,20 +1516,27 @@ end
 -- says what this kind of group IS. A bare row would be one click cheaper and
 -- would drop that sentence on the floor.
 -- ============================================================
+-- opts.onPage / opts.blocked / opts.gate: the classic tab's mount, exactly as the
+-- Layout Groups pane takes them (see opts.onPage above S.BuildAddLayoutGroupPane).
 S.BuildAddDebuffGroupPane = function(host, opts)
     opts = opts or {}
     local W = opts.width or 260
     local gc = { r = 0.91, g = 0.66, b = 0.25 }  -- Layout Groups tab accent
 
     local y = 0
-    CreateNumberedHeading(host, 1, L["WHICH KIND OF GROUP?"], y, W)
-    y = y - 20
+    if not opts.onPage then
+        CreateNumberedHeading(host, 1, L["WHICH KIND OF GROUP?"], y, W)
+        y = y - 20
+    end
 
     -- ⚠ NO FILTER FOOTER HERE. Debuff groups are Blizzard's categories, not the
     -- addon's filters, so a Create/Manage Filters pair would point at a library
     -- this panel cannot use.
     local defs = DebuffGroupCards()
-    local tileW = floor((W - GROUP_TILE_GAP * (#defs - 1)) / #defs)
+    -- On the page the one tile is half the column, the size of the Layout Groups
+    -- tab's two -- a single picture stretched across the tab reads as a banner.
+    local cols = opts.onPage and max(#defs, 2) or #defs
+    local tileW = floor((W - GROUP_TILE_GAP * (cols - 1)) / cols)
     local rowH = 0
     for i, def in ipairs(defs) do
         local onPick = def.onClick
@@ -1545,11 +1547,13 @@ S.BuildAddDebuffGroupPane = function(host, opts)
             tooltip = { title = def.title, lines = { def.desc } },
             Paint = function(pv) PaintIconRowOnThumb(pv, colors, ghost) end,
             onClick = function()
+                if opts.gate and not opts.gate() then return end
                 if opts.Close then opts.Close() end
                 onPick()
             end,
         })
         tile:SetPoint("TOPLEFT", (i - 1) * (tileW + GROUP_TILE_GAP), y)
+        if opts.blocked then tile:SetTileState("disabled") end
         rowH = max(rowH, tile.layoutHeight or 68)
     end
     y = y - (rowH + 2)
@@ -1563,27 +1567,25 @@ end
 -- ============================================================
 -- THE DEBUFFS TAB'S HEAD AREA
 -- ------------------------------------------------------------
--- The teaching sentence, the one choice card and the dedup explainer --
+-- The Add Debuff Group button, the teaching sentence and the dedup explainer --
 -- everything above the list. ONE definition, two hosts, exactly as the Layout
 -- Groups tab's is -- opts.skipAddBlock included, for the same reason.
 -- ============================================================
 S.BuildDebuffGroupsHeadArea = function(parent, yPos, opts)
     local skipAdd = opts and opts.skipAddBlock or false
-    local gc = { r = 0.91, g = 0.66, b = 0.25 }  -- Layout Groups tab accent
-
-    -- The column every object below is anchored 8px inside on both sides -- the
-    -- host's own explicit width less those two insets. Derived rather than read
-    -- off a child, for the reason S.BuildEffectsHeadArea spells out: a child's
-    -- width is not resolved until the layout pass, and the choice cards need a
-    -- number NOW to wrap their descriptions against.
-    local hostW = parent:GetWidth() or 0
-    local COL_W = (hostW > 40) and (hostW - 16) or nil
 
     -- READ path: visiting the tab never creates adDB.debuffGroups.
-    -- Read first for the same reason as the Layout Groups tab: an empty tab
-    -- swaps the compact button, the dedup explainer and the heading for a
-    -- single choice card.
+    -- Read first for the same reason as the Layout Groups tab: the teaching
+    -- sentence is for an empty tab, the dedup explainer for a full one.
     local hasGroups = #DebuffGroupsRead() > 0
+
+    -- ── DEBUFF GROUP ──
+    -- The Debuffs pool's half of the same change: its one tile, on the page
+    -- (S.BuildAddDebuffGroupPane, opts.onPage), one click adds. The debuffGroups
+    -- array is still born lazily on the first add.
+    if not skipAdd then
+        yPos = S.BuildClassicAddTiles(parent, yPos, "debuff")
+    end
 
     -- Teaching prose, first visit only -- see the Layout Groups tab.
     if not hasGroups then
@@ -1595,21 +1597,6 @@ S.BuildDebuffGroupsHeadArea = function(parent, yPos, opts)
         intro:SetText(L["A row of icons that arranges itself as auras come and go."])
         intro:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
         yPos = yPos - 34
-    end
-
-    -- The one kind this tab makes, always -- replaces "+ Debuff Group" outright.
-    -- The debuffGroups array is born lazily on the first add.
-    if not skipAdd then
-        local addBlock = GUI:CreateChoiceCardGroup(parent, {
-            title    = L["ADD A DEBUFF GROUP"],
-            accent   = gc,
-            width    = COL_W,
-            onToggle = function() S.SwitchTab("layout") end,
-            cards    = DebuffGroupCards(),
-        })
-        addBlock:SetPoint("TOPLEFT", 8, yPos)
-        addBlock:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
-        yPos = yPos - (addBlock.layoutHeight + 10)
     end
 
     if hasGroups then
@@ -2120,10 +2107,34 @@ local function BuildAuraDesignerIsland(guiRef, pageRef, dbRef)
     buffTabBar:SetHeight(BUFFTAB_H)
     buffTabBar:SetPoint("TOPLEFT", S.mainFrame, "TOPLEFT", 0, yPos)
     buffTabBar:SetPoint("TOPRIGHT", S.mainFrame, "TOPRIGHT", 0, yPos)
-    -- The strip itself is shared with the popout layout's row page, which mounts
-    -- it as a band -- see S.BuildPoolStrip (AuraDesigner/UI/Rows.lua). Only the
-    -- host differs: a slice of S.mainFrame here, a band there.
-    S.BuildPoolStrip(buffTabBar)
+    -- ☠ THE SPEC PICKER IS BACK ON THE STRIP'S RIGHT END, WHERE IT WAS BEFORE THE
+    -- ROWS REWORK. dff68754 moved it onto a band of its own in the rows page and
+    -- took it out of S.BuildPoolStrip -- which was this strip's only copy -- so the
+    -- split panel was left with no way to pick a spec for My Buffs. It is the same
+    -- builder the rows page mounts (S.BuildSpecPicker), in a slice of this strip.
+    -- ⚠ The pool tabs divide what is LEFT of it (their own OnSizeChanged, on their
+    -- own host), and the slice shrinks with a narrow window so it never eats them.
+    local SPEC_W_MAX, SPEC_W_MIN, SPEC_GAP = 215, 150, 8
+    local function SpecSliceWidth(w)
+        return max(SPEC_W_MIN, min(SPEC_W_MAX, floor((w or 0) * 0.35)))
+    end
+    local specHost = CreateFrame("Frame", nil, buffTabBar)
+    specHost:SetPoint("TOPRIGHT", buffTabBar, "TOPRIGHT", -3, 0)
+    specHost:SetPoint("BOTTOMRIGHT", buffTabBar, "BOTTOMRIGHT", -3, 0)
+    specHost:SetWidth(SpecSliceWidth(buffTabBar:GetWidth()))
+    buffTabBar:SetScript("OnSizeChanged", function(_, w)
+        if w and w > 10 then specHost:SetWidth(SpecSliceWidth(w)) end
+    end)
+    local poolHost = CreateFrame("Frame", nil, buffTabBar)
+    poolHost:SetPoint("TOPLEFT", buffTabBar, "TOPLEFT", 0, 0)
+    poolHost:SetPoint("BOTTOMLEFT", buffTabBar, "BOTTOMLEFT", 0, 0)
+    poolHost:SetPoint("RIGHT", specHost, "LEFT", -SPEC_GAP, 0)
+    -- The pool tabs: My Buffs / Debuffs / Any Buff, plus PI Helper on a priest.
+    -- The builder is shared with nothing now; it lives beside the rows page's own
+    -- folder tabs (S.BuildPoolTabs, AuraDesigner/UI/Rows.lua) so the pool list
+    -- (PoolDefs) has one definition.
+    S.BuildPoolStrip(poolHost)
+    S.BuildSpecPicker(specHost)
 
     yPos = yPos - (BUFFTAB_H + SECTION_GAP)
 
@@ -2324,7 +2335,7 @@ end
 -- answers nil in classic and every row the other arm builds needs its table.
 -- ============================================================
 function DF.BuildAuraDesignerPage(guiRef, pageRef, dbRef, Add, AddSpace)
-    if Add and P.BuildAuraDesignerRowsPage and not DF:IsClassicSettingsLayout() then
+    if Add and P.BuildAuraDesignerRowsPage and DF:DesignersUseRows() and not DF:IsClassicSettingsLayout() then
         -- A previous build's island is not in page.children -- it never went
         -- through Add -- so DoBuild's own retire loop cannot see it, and it would
         -- sit under the bands still showing the last mode's controls.

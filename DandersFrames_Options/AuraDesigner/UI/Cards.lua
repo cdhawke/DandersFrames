@@ -4009,6 +4009,10 @@ S.SwitchTab = function(tabKey)
     S.adPickerDirty = false
     CloseADPicker()
     if GUI then GUI:CloseAllMenus() end   -- an open dropdown (e.g. spec) must not outlive the tab
+    -- ...and an add flow started for another tab, pool, spec or mode, or with the
+    -- designer since switched off, must not either: it ends here and the rebuild
+    -- below draws the list (see THE CLASSIC DESIGNER'S INLINE ADD FLOWS).
+    if S.SyncClassicAddFlow then S.SyncClassicAddFlow(tabKey) end
 
     for key, btn in pairs(tabButtons) do
         btn:SetActive(key == tabKey)  -- underline + accent/dim label (tab mode)
@@ -4184,7 +4188,13 @@ P.SetMainTab = SetMainTab
 -- other caller omits it and the instance keeps the type's own default, exactly as
 -- before. It writes the field CreateIndicatorInstance already seeds -- no new
 -- shape, nothing to migrate.
+--
+-- ☠ RETURNS FALSE WHEN IT REFUSED, and it refuses a My Buffs add with no spec
+-- resolved (Options.lua's P.RefuseNoSpecWrite) -- the record would land in a
+-- table nobody keeps. Said once, here, so no caller has to; the add pane reads
+-- the false and stays open instead of closing on an add that never happened.
 local function AddPickedSpell(auraName, typeKey, mode, anchor)
+    if P.RefuseNoSpecWrite and P.RefuseNoSpecWrite() then return false end
     -- Card keys embed the B1 pool prefix in the name segment
     -- ("placed:other:<name>#<id>" / "frame:<type>:other:<name>").
     if mode == "placed" then
@@ -4206,6 +4216,7 @@ local function AddPickedSpell(auraName, typeKey, mode, anchor)
     if DF.AuraDesigner.Engine and DF.AuraDesigner.Engine.ForceRefreshAllFrames then
         DF.AuraDesigner.Engine:ForceRefreshAllFrames()
     end
+    return true
 end
 
 -- ── ADD TO LAYOUT GROUP ("group" picker context) ──
@@ -4366,6 +4377,12 @@ local function ADAddByID(idNum, idText, picker, mode, typeKey, groupID)
         return
     end
     if not auraName then return end
+    -- ☠ NO SPEC ON MY BUFFS: refused before anything is minted, and said in the
+    -- picker, where the user is looking (P.RefuseNoSpecWrite, Options.lua).
+    if P.RefuseNoSpecWrite and P.RefuseNoSpecWrite(true) then
+        picker:Echo(L["No trackable spells found for this spec.\n\nYou can select a different spec using the dropdown above."])
+        return
+    end
 
     -- Group context: no already-used gate (a spell can hold several
     -- indicators in one group). AddSpellToGroup echoes and refreshes.
@@ -4400,59 +4417,6 @@ local function ADAddByID(idNum, idText, picker, mode, typeKey, groupID)
     RefreshPlacedIndicators()    -- live preview updates behind the picker
     RefreshPreviewEffects()
     return true
-end
-
--- ── OPEN: ADD INDICATOR (placed + frame contexts) ──
--- typeKey: "icon"|"square"|"bar" (placed) or "border"|"healthbar"|etc.
--- (frame); mode: "placed" or "frame". Single-pick — choosing a spell
--- creates the indicator (or frame-level type config), closes the picker
--- and lands on its expanded effect card. My Buffs locks the picker to the
--- resolved spec's class (class dropdown hidden, records limited to the
--- class + "ALL"); Other Buffs offers the full database with both filters.
-local function OpenIndicatorPicker(typeKey, mode)
-    local isOther = IsOtherTab()
-    local spec = (not isOther) and ResolveSpec() or nil
-    local specInfo = spec and DF.AuraDesigner.SpecInfo[spec]
-    local badgeColor = BADGE_COLORS[typeKey] or BADGE_COLORS.icon
-    local title
-    if mode == "frame" then
-        title = format(L["Select trigger for %s"], S.FRAME_LEVEL_LABELS[typeKey] or typeKey)
-    else
-        title = L["Select a spell"]
-    end
-    OpenADPicker({
-        title = title,
-        subtitle = S.PLACED_TYPE_LABELS[typeKey] or S.FRAME_LEVEL_LABELS[typeKey] or typeKey,
-        subtitleColor = badgeColor,
-        records = function() return BuildADPickerRecords(false) end,
-        classLock = (not isOther) and specInfo and specInfo.class or nil,
-        isBlocked = function(rec)
-            local cross = ADCrossBlockText(rec)
-            if cross then return cross end
-            if mode == "placed" then
-                if IsAuraTypePlaced(rec.auraName, typeKey) then return L["Placed"] end
-            elseif HasFrameEffect(rec.auraName, typeKey) then
-                return L["Active"]
-            end
-            return nil
-        end,
-        rowActions = {
-            {
-                label = L["Add"], -- labels the ID-row button; rows are click-to-add
-                handler = function(rec, _, picker)
-                    AddPickedSpell(rec.auraName, typeKey, mode)
-                    picker:Close()
-                    S.SwitchTab("effects")
-                    RefreshPlacedIndicators()
-                    RefreshPreviewEffects()
-                end,
-            },
-        },
-        allowAddByID = true,
-        onAddByID = function(idNum, _, picker, idText)
-            return ADAddByID(idNum, idText, picker, mode, typeKey, nil)
-        end,
-    })
 end
 
 -- ── OPEN: ADD TO LAYOUT GROUP ──
@@ -5444,8 +5408,8 @@ end
 
 -- ── BUILD EFFECTS TAB ──
 -- ── THE EFFECTS TAB'S HEAD AREA ──
--- The add block (or, while one is open, the scope picker that takes the whole
--- column over), the ACTIVE INDICATORS heading, the type chips and the Other
+-- The Add from a Spell / Add from a Filter buttons (the PI Helper's tiles on its pool), the ACTIVE
+-- INDICATORS heading, the type chips and the Other
 -- Buffs hint. Everything above the list of effects, and nothing of the list.
 --
 -- ============================================================
@@ -5493,50 +5457,9 @@ end
 -- with before it (spec section 23).
 -- ============================================================
 
--- The three scopes and the type lists behind them. A VERB rather than a file-scope
--- table because every label in here is an L[...] lookup, and a table built at file
--- scope freezes on whatever locale was loaded when the file parsed.
---
--- ⚠ STILL LIVE, FOR THE SPLIT PANEL ONLY. The island layout keeps its three
--- pinned scope cards and the picker column they open, in its own head area at
--- the foot of this file; the popout layout's panel is flat and does not read it.
-local function AddFlowScopes()
-    local PLACED_ITEMS = {
-        { label = L["Icon"],   type = "icon",   desc = L["The spell's own artwork"]          },
-        { label = L["Square"], type = "square", desc = L["A small coloured square"]          },
-        { label = L["Bar"],    type = "bar",    desc = L["A bar that drains as it expires"]  },
-    }
-    -- Sound is absent from the filter list by design: the native sound path
-    -- registers per spell ID, so a 600-spell filter would mean 600 registrations.
-    local FRAME_ITEMS = {
-        { label = L["Border"],            type = "border",     desc = L["Outlines the whole frame"]        },
-        { label = L["Health Bar Color"],  type = "healthbar",  desc = L["Recolours the health bar"]        },
-        { label = L["Background Color"],  type = "background", desc = L["Recolours the frame background"]  },
-        { label = L["Name Text Color"],   type = "nametext",   desc = L["Recolours the player's name"]     },
-        { label = L["Health Text Color"], type = "healthtext", desc = L["Recolours the health numbers"]    },
-        { label = L["Sound Alert"],       type = "sound",      desc = L["Plays a sound. Nothing changes on the frame."] },
-    }
-    local FRAME_FILTER_ITEMS = {
-        { label = L["Border"],            type = "border",     desc = L["Outlines the whole frame"]        },
-        { label = L["Health Bar Color"],  type = "healthbar",  desc = L["Recolours the health bar"]        },
-        { label = L["Background Color"],  type = "background", desc = L["Recolours the frame background"]  },
-        { label = L["Name Text Color"],   type = "nametext",   desc = L["Recolours the player's name"]     },
-        { label = L["Health Text Color"], type = "healthtext", desc = L["Recolours the health numbers"]    },
-    }
-    return {
-        placed = { items = PLACED_ITEMS,       title = L["Placed on the Frame"],
-                   desc = L["An icon, square or bar, wherever you put it"] },
-        frame  = { items = FRAME_ITEMS,        title = L["Frame-Level Effect"],
-                   desc = L["Recolours the frame itself"] },
-        filter = { items = FRAME_FILTER_ITEMS, title = L["From a Filter"],
-                   desc = L["The same frame changes, driven by a whole filter"] },
-    }
-end
-P.AddFlowScopes = AddFlowScopes
-
 -- ── THE FLAT EFFECT LIST ──
--- ☠ ONE LIST, NO CLASSIFICATION. The same nine effects the three scopes above
--- hold between them, with the taxonomy taken off: `mode` is still what the store
+-- ☠ ONE LIST, NO CLASSIFICATION. The same nine effects the old three scopes
+-- (Placed on the Frame / Frame-Level / From a Filter) held between them, with the taxonomy taken off: `mode` is still what the store
 -- needs (a placed indicator instance, or a frame-level type config) but it is
 -- carried BY the choice rather than asked before it.
 --
@@ -5569,7 +5492,8 @@ local function AddFlowEffects()
           desc = L["Recolours the player's name"],      filterable = true  },
         { type = "healthtext", mode = "frame",  label = L["Health Text Color"],
           desc = L["Recolours the health numbers"],     filterable = true  },
-        -- Sound is not filterable: see AddFlowScopes above for why.
+        -- Sound is not filterable: the native sound path registers per spell ID,
+        -- so a 600-spell filter would mean 600 registrations.
         { type = "sound",      mode = "frame",  label = L["Sound Alert"],
           desc = L["Plays a sound. Nothing changes on the frame."], filterable = false },
     }
@@ -5787,6 +5711,46 @@ local function CreateFrameTile(parent, opts)
     end
     tile:SetTileState("normal")
 
+    -- ── A SHORT REASON ON THE PICTURE ("Added", "Not for filters") ──
+    -- For a dim tile that has to say WHY where the eye already is, not only in
+    -- the tooltip. Opt-in: nothing draws until a caller sets a caption, so every
+    -- tile that never asks is exactly what it was.
+    -- ☠ ITS OWN FRAME, RAISED OVER THE PICTURE. The preview is a child frame, and
+    -- a string on the tile itself would draw UNDER it (frame level beats draw
+    -- layer). It takes no mouse -- a plain Frame never does -- so the press still
+    -- reaches the tile. And it is NOT dimmed with the picture: the reason is the
+    -- one thing on a dim tile that has to stay readable.
+    local capFrame
+    tile.SetCaption = function(self, text)
+        local cap = capFrame
+        if not (text and text ~= "") then
+            if cap then cap:Hide() end
+            return
+        end
+        if not cap then
+            cap = CreateFrame("Frame", nil, self)
+            cap:SetPoint("BOTTOMLEFT", self, "TOPLEFT", TILE_PAD, -(TILE_PAD + picH))
+            cap:SetPoint("BOTTOMRIGHT", self, "TOPRIGHT", -TILE_PAD, -(TILE_PAD + picH))
+            cap:SetHeight(14)
+            local plate = cap:CreateTexture(nil, "BACKGROUND")
+            plate:SetAllPoints(cap)
+            plate:SetColorTexture(0, 0, 0, 0.75)
+            local fs = cap:CreateFontString(nil, "OVERLAY")
+            GUI:SetSettingsFont(fs, 9, "")
+            fs:SetPoint("LEFT", 2, 0)
+            fs:SetPoint("RIGHT", -2, 0)
+            fs:SetJustifyH("CENTER")
+            fs:SetWordWrap(false)
+            fs:SetTextColor(C_TEXT.r, C_TEXT.g, C_TEXT.b)
+            cap.text = fs
+            capFrame = cap
+            self.dfCaption = cap
+        end
+        cap:SetFrameLevel(((pv and pv.GetFrameLevel and pv:GetFrameLevel()) or self:GetFrameLevel() or 1) + 5)
+        cap.text:SetText(text)
+        cap:Show()
+    end
+
     tile:SetScript("OnClick", function(self)
         if self.dfDisabled then return end
         if opts.onClick then opts.onClick(self) end
@@ -5945,11 +5909,31 @@ local function CreateNumberedHeading(parent, number, caption, y, width, x)
 
     head.caption = cap
     head.tag = tag
+
+    -- ── THE ANSWERED TICK (a heading that speaks its state only) ──
+    -- The addon's own check icon, not a glyph: a font may not carry one, and an
+    -- emoji is not a UI. Hidden unless a heading that speaks its state is answered.
+    local tick = head:CreateTexture(nil, "OVERLAY")
+    tick:SetSize(12, 12)
+    tick:SetPoint("RIGHT", head, "RIGHT", 0, 0)
+    tick:SetTexture("Interface\\AddOns\\DandersFrames\\Media\\Icons\\check")
+    tick:SetVertexColor(tc.r, tc.g, tc.b, 1)
+    tick:Hide()
+    head.tick = tick
+
     -- ☠ ONE STATE VERB, NOT AN ENABLED FLAG. A boolean can only ever draw two of
     -- the four states above, and the two it collapses -- "not yet" and "not
     -- needed" -- are precisely the pair the reader has to be able to tell apart.
+    --
+    -- ⚠ head:SetSpeaks(true): THE STATE IN WORDS, NOT COLOUR ALONE (classic
+    -- designer, 2026-09-22). Called by the add pane's opts.inline. Answered shows the tick, the
+    -- section awaiting you says "Next", and not-needed keeps its tag. Absent (the
+    -- rows page, the group panes), the heading is exactly what it always was.
+    local speaks = false
+    head.SetSpeaks = function(_, on) speaks = on and true or false end
     head.SetHeadState = function(self, state, tagText)
         state = state or SEC_TODO
+        local speak = speaks
         -- Alpha is the ONE thing reserved for "not yet". Everything else stays
         -- at full opacity and says what it is with colour and words instead.
         local a = (state == SEC_TODO) and 0.4 or 1
@@ -5965,8 +5949,24 @@ local function CreateNumberedHeading(parent, number, caption, y, width, x)
         end
         -- ...and the tag is QUIETER than the caption it sits beside, not louder:
         -- "keep the heading readable" is the instruction, and a bright tag beside
-        -- a dim heading inverts it.
-        tag:SetText((state == SEC_NA) and (tagText or "") or "")
+        -- a dim heading inverts it. "Next" is the one exception -- it is the
+        -- pointer to where the eye should go, so it wears the accent.
+        local tagStr = ""
+        if state == SEC_NA then
+            tagStr = tagText or ""
+        elseif speak and state == SEC_ACTIVE then
+            tagStr = L["Next"]
+        end
+        tag:SetText(tagStr)
+        if speak and state == SEC_ACTIVE then
+            tag:SetTextColor(tc.r, tc.g, tc.b)
+        else
+            tag:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
+        end
+        local ticked = speak and state == SEC_ANSWERED
+        if ticked then tick:Show() else tick:Hide() end
+        -- The caption stops short of whichever marker holds the row's right end.
+        cap:SetPoint("RIGHT", ticked and tick or tag, "LEFT", -6, 0)
         self.dfHeadState = state
     end
     -- ⚠ ANSWERED IS THE CONSTRUCTION DEFAULT, and deliberately so: it is exactly
@@ -6108,12 +6108,35 @@ end
 --   opts.SetHeight(h)  report the pane's height, normally GUI:RelayoutHost
 --   opts.Close()       shut the panel once something has been added
 --
+-- ⚠ THREE OPT-INS FOR THE CLASSIC DESIGNER, WHICH RUNS THIS FLOW INSIDE ITS
+-- EFFECTS TAB (see THE CLASSIC DESIGNER'S INLINE ADD FLOWS). Absent, the panel
+-- is exactly what the rows page has always built.
+--   opts.source    "spell" or "filter": the route was already chosen by the tile
+--                  that opened the flow, so section 1 draws that ONE route, full
+--                  width, and the two-way toggle is not built at all
+--   opts.fitWidth  the host is a tab column of whatever width the window gives it,
+--                  not a fixed popout: the picture tiles take as many columns as
+--                  that width fits (rows kept even) and grow their pictures with it
+--   opts.restore   a Snapshot() taken from an earlier build of the same flow, whose
+--                  answers this build starts from -- the tab re-lays the flow at a
+--                  new width by building it again
+--   opts.inline    the pane lives in a tab, not a pooled popout, so it may change
+--                  height after it is built. Every not-needed / not-yet state is
+--                  then SAID rather than greyed (2026-09-22): section 3 hides its
+--                  grid for a frame-level effect or no look yet and shows one line
+--                  instead, section 2 says "Choose an aura first." over its tiles
+--                  (dimmed as one block) and writes a dim tile's reason ON it, and
+--                  the headings speak their state (a tick, "Next"). Sync re-lays
+--                  the pane and reports the new height through opts.SetHeight.
+--
 -- Returns the panel's own verbs: Sync (call on every open -- see the header),
--- and the four state transitions, which are the real entry points its own
--- controls use.
+-- the four state transitions, which are the real entry points its own
+-- controls use, and Snapshot.
 S.BuildAddIndicatorPane = function(host, opts)
     opts = opts or {}
     local W = opts.width or 260
+    local srcOnly = (opts.source == "spell" or opts.source == "filter") and opts.source or nil
+    local inline = opts.inline and true or false
     -- ☠ TWO WIDTHS, AND EVERY CONTROL BELOW USES THE SECOND ONE. G is the left
     -- edge of everything the user can see or click; CW is what is left for it.
     -- The RINGS are the one exception -- they keep W and start at 0, because the
@@ -6144,6 +6167,10 @@ S.BuildAddIndicatorPane = function(host, opts)
     -- layout below is written in. Filled as the layout walks past, so the rings
     -- cannot drift from the content: nothing here is a second copy of a number.
     local secTop, secEnd = {}, {}
+    -- opts.inline's extra pieces: section 2's "choose an aura first" line and the
+    -- block its tiles dim as one, section 3's one-line stand-in for the grid, the
+    -- note beside the grid, and the re-lay Sync runs. All nil on the rows page.
+    local sec2Note, tileBlock, tilesH, sec2BodyTop, sec3Line, noteBox, Relayout
 
     -- ── WHAT A FINISHED ADD COSTS ──
     -- The same three verbs every other add path runs.
@@ -6228,12 +6255,17 @@ S.BuildAddIndicatorPane = function(host, opts)
             return false
         end
         local eff = EFFECT_BY_TYPE[selected]
+        -- ⚠ A REFUSED ADD KEEPS THE PANE OPEN. AddPickedSpell answers false when it
+        -- refused (My Buffs with no spec) and has already said why; closing the
+        -- flow then would read as "added" with nothing in the list.
+        local ok
         if source.kind == "filter" then
-            AddPickedSpell(source.ref, selected, "frame")
+            ok = AddPickedSpell(source.ref, selected, "frame")
         else
-            AddPickedSpell(source.auraName, selected, eff.mode,
-                           (eff.mode == "placed") and anchor or nil)
+            ok = AddPickedSpell(source.auraName, selected, eff.mode,
+                                (eff.mode == "placed") and anchor or nil)
         end
+        if ok == false then return false end
         Finish()
         return true
     end
@@ -6333,24 +6365,33 @@ S.BuildAddIndicatorPane = function(host, opts)
     local SRC_GAP = 7
     local SRC_W = floor((CW - SRC_GAP) / 2)
 
-    spellBtn = CreateFrame("Button", nil, host, "BackdropTemplate")
-    spellBtn:SetPoint("TOPLEFT", G, y)
-    GUI:StyleButton(spellBtn, {
-        width = SRC_W, height = 30, primary = true, align = "left", fitText = false,
-        icon = { texture = "Interface\\AddOns\\DandersFrames\\Media\\Icons\\search", size = 14 },
-        text = L["Select a spell"], font = "DFFontHighlight",
-    })
-    spellBtn:SetScript("OnClick", OpenSpellStep)
+    -- ⚠ opts.source: ONE ROUTE, THE WHOLE ROW. The classic designer's two add
+    -- tiles already asked "from a spell or from a filter?", so asking again here
+    -- would be the question twice. The route that was not chosen is not built --
+    -- Sync treats a missing button as nothing to light.
+    if srcOnly ~= "filter" then
+        spellBtn = CreateFrame("Button", nil, host, "BackdropTemplate")
+        spellBtn:SetPoint("TOPLEFT", G, y)
+        GUI:StyleButton(spellBtn, {
+            width = srcOnly and CW or SRC_W, height = 30, primary = true, align = "left",
+            fitText = false,
+            icon = { texture = "Interface\\AddOns\\DandersFrames\\Media\\Icons\\search", size = 14 },
+            text = L["Select a spell"], font = "DFFontHighlight",
+        })
+        spellBtn:SetScript("OnClick", OpenSpellStep)
+    end
 
-    filterBtn = CreateFrame("Button", nil, host, "BackdropTemplate")
-    filterBtn:SetPoint("TOPLEFT", G + SRC_W + SRC_GAP, y)
-    GUI:StyleButton(filterBtn, {
-        width = CW - SRC_W - SRC_GAP, height = 30, primary = true, align = "left",
-        fitText = false,
-        icon = { texture = "Interface\\AddOns\\DandersFrames\\Media\\Icons\\filter_list", size = 14 },
-        text = L["Select a filter"], font = "DFFontHighlight",
-    })
-    filterBtn:SetScript("OnClick", OpenFilterStep)
+    if srcOnly ~= "spell" then
+        filterBtn = CreateFrame("Button", nil, host, "BackdropTemplate")
+        filterBtn:SetPoint("TOPLEFT", srcOnly and G or (G + SRC_W + SRC_GAP), y)
+        GUI:StyleButton(filterBtn, {
+            width = srcOnly and CW or (CW - SRC_W - SRC_GAP), height = 30, primary = true,
+            align = "left", fitText = false,
+            icon = { texture = "Interface\\AddOns\\DandersFrames\\Media\\Icons\\filter_list", size = 14 },
+            text = L["Select a filter"], font = "DFFontHighlight",
+        })
+        filterBtn:SetScript("OnClick", OpenFilterStep)
+    end
     y = y - 34
 
     -- ⚠ INSIDE A FRAME, not a bare FontString on the pane. PopoutContent builds
@@ -6373,27 +6414,82 @@ S.BuildAddIndicatorPane = function(host, opts)
     sec2Head = CreateNumberedHeading(host, 2, L["HOW SHOULD IT SHOW?"], y, CW, G)
     y = y - (SECTION_HEAD_H + 4)
 
+    -- ── opts.inline: ONE LINE FOR "NOT YET", AND THE TILES AS ONE BLOCK ──
+    -- Nine separately greyed tiles read as nine broken buttons; one sentence over
+    -- a dimmed block reads as "one thing first". The line takes its slot only while
+    -- no aura is chosen (Relayout below) -- the aura is picked in an overlay, so
+    -- the tiles move up while the user is looking at the picker, not at them.
+    local tileParent, tileX0, rowTop0 = host, G, y
+    if inline then
+        sec2BodyTop = y
+        sec2Note = CreateFrame("Frame", nil, host)
+        sec2Note:SetSize(CW, SOURCE_LINE_H)
+        sec2Note:SetPoint("TOPLEFT", G, y)
+        local nt = sec2Note:CreateFontString(nil, "OVERLAY")
+        GUI:SetSettingsFont(nt, 10, "")
+        nt:SetPoint("LEFT", 0, 0)
+        nt:SetPoint("RIGHT", 0, 0)
+        nt:SetJustifyH("LEFT")
+        nt:SetWordWrap(false)
+        nt:SetText(L["Choose an aura first."])
+        nt:SetTextColor(C_TEXT.r, C_TEXT.g, C_TEXT.b)
+        sec2Note.text = nt
+        tileBlock = CreateFrame("Frame", nil, host)
+        tileBlock:SetWidth(CW)
+        tileBlock:SetHeight(1)
+        tileBlock:SetPoint("TOPLEFT", G, y)
+        tileParent, tileX0, rowTop0 = tileBlock, 0, 0
+    end
+
     local TILE_COLS, TILE_GAP = 3, 7
+    local TILE_PIC_FIT
+    if opts.fitWidth then
+        -- ⚠ AS MANY COLUMNS AS FIT AT THE POPOUT'S OWN TILE SIZE, THEN EVENED OUT.
+        -- Nine tiles at four a row is 4 + 4 + 1, a lone tile on a row of its own
+        -- that reads as left over; so the row count comes first and the columns
+        -- are what spreads the nine evenly across it (3x3, 5+4, or one row of 9).
+        -- Never fewer than the popout's three.
+        local fits = floor((CW + TILE_GAP) / (78 + TILE_GAP))
+        local n = #EFFECTS
+        if fits >= n then
+            TILE_COLS = n
+        elseif fits > 3 then
+            local rows = math.ceil(n / fits)
+            TILE_COLS = math.ceil(n / rows)
+        end
+    end
     local TILE_W = floor((CW - TILE_GAP * (TILE_COLS - 1)) / TILE_COLS)
-    local rowTop, rowH = y, 0
+    if opts.fitWidth then
+        -- The picture keeps the popout tile's proportions (a 72x44 box) as the
+        -- tile widens, capped so a very wide window does not turn nine thumbnails
+        -- into nine posters.
+        TILE_PIC_FIT = max(TILE_PIC_H, min(floor((TILE_W - TILE_PAD * 2) * 44 / 72), 64))
+    end
+    local rowTop, rowH = rowTop0, 0
     for i, eff in ipairs(EFFECTS) do
         local col = (i - 1) % TILE_COLS
         local capturedType = eff.type
-        local tile = CreateFrameTile(host, {
-            width = TILE_W,
+        local tile = CreateFrameTile(tileParent, {
+            width = TILE_W, picHeight = TILE_PIC_FIT,
             label = eff.label,
             accent = BADGE_COLORS[eff.type] or tc,
             tooltip = { title = eff.label, lines = { eff.desc } },
             Paint = function(pv) PaintEffectOnThumb(pv, capturedType) end,
             onClick = function() SelectType(capturedType) end,
         })
-        tile:SetPoint("TOPLEFT", G + col * (TILE_W + TILE_GAP), rowTop)
+        tile:SetPoint("TOPLEFT", tileX0 + col * (TILE_W + TILE_GAP), rowTop)
         rowH = max(rowH, tile.layoutHeight or 72)
         tiles[eff.type] = tile
         if col == TILE_COLS - 1 or i == #EFFECTS then
             rowTop = rowTop - (rowH + TILE_GAP)
             rowH = 0
         end
+    end
+    if inline then
+        -- Tiles were laid from the block's own top; the block is placed by Relayout.
+        tilesH = -(rowTop + TILE_GAP)
+        tileBlock:SetHeight(max(tilesH, 1))
+        rowTop = y + rowTop
     end
     -- The last row's trailing gap is not spent.
     secEnd[2] = rowTop + TILE_GAP
@@ -6418,7 +6514,7 @@ S.BuildAddIndicatorPane = function(host, opts)
 
     -- ⚠ INSIDE A FRAME, not a bare FontString on the pane -- see
     -- CreateNumberedHeading. It also has to be hideable with its own state.
-    local noteBox = CreateFrame("Frame", nil, host)
+    noteBox = CreateFrame("Frame", nil, host)
     noteBox:SetSize(CW - (ANCHOR_CELL * 3 + ANCHOR_GUTTER * 2) - 10,
                     ANCHOR_CELL * 3 + ANCHOR_GUTTER * 2)
     noteBox:SetPoint("TOPLEFT", G + ANCHOR_CELL * 3 + ANCHOR_GUTTER * 2 + 10, y)
@@ -6429,6 +6525,25 @@ S.BuildAddIndicatorPane = function(host, opts)
     gridNote:SetJustifyH("LEFT")
     gridNote:SetWordWrap(true)
     gridNote:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
+
+    -- ── opts.inline: THE GRID ONLY WHERE A POSITION IS ASKED FOR ──
+    -- ☠ A GREYED GRID FOR AN EFFECT THAT HAS NO POSITION IS A QUESTION NOBODY IS
+    -- ASKING, drawn as if it were. Six of the nine effects change the whole frame,
+    -- so in the tab the grid is hidden for them -- and for "no look yet" -- and this
+    -- one line stands in its place (the heading's own tag says "Not needed").
+    if inline then
+        sec3Line = CreateFrame("Frame", nil, host)
+        sec3Line:SetSize(CW, SOURCE_LINE_H)
+        sec3Line:SetPoint("TOPLEFT", G, y)
+        local lt = sec3Line:CreateFontString(nil, "OVERLAY")
+        GUI:SetSettingsFont(lt, 10, "")
+        lt:SetPoint("TOPLEFT", 0, -2)
+        lt:SetPoint("TOPRIGHT", 0, -2)
+        lt:SetJustifyH("LEFT")
+        lt:SetWordWrap(true)
+        sec3Line.text = lt
+        sec3Line:Hide()
+    end
     secEnd[3] = y - (ANCHOR_CELL * 3 + ANCHOR_GUTTER * 2)
     -- The pointer below is not a section, but section 3's ring still has to clear
     -- it, so it is dropped by the same amount for the same reason.
@@ -6503,6 +6618,74 @@ S.BuildAddIndicatorPane = function(host, opts)
 
     local paneH = max(-y + 2, 1)
 
+    -- ── opts.inline: THE RE-LAY ──
+    -- Everything from section 2's body down is placed again from the state Sync
+    -- just derived, so the pane is exactly as tall as what it shows: no gap where a
+    -- hidden grid stood, and the tab's column told the new height (opts.SetHeight)
+    -- so the page below it does not jump. Uses the same numbers the build did.
+    if inline then
+        for _, e in ipairs({ sec1Head, sec2Head, sec3Head }) do e:SetSpeaks(true) end
+        local GRID_SPAN = ANCHOR_CELL * 3 + ANCHOR_GUTTER * 2
+        Relayout = function(noAura, placedPick)
+            local ry = sec2BodyTop
+            if noAura then
+                sec2Note:Show()
+                ry = ry - SOURCE_LINE_H
+            else
+                sec2Note:Hide()
+            end
+            tileBlock:ClearAllPoints()
+            tileBlock:SetPoint("TOPLEFT", G, ry)
+            ry = ry - tilesH
+            secEnd[2] = ry
+            ry = ry - SECTION_GAP
+
+            secTop[3] = ry
+            sec3Head:ClearAllPoints()
+            sec3Head:SetPoint("TOPLEFT", G, ry)
+            ry = ry - (SECTION_HEAD_H + 4)
+            if placedPick then
+                grid:ClearAllPoints()
+                grid:SetPoint("TOPLEFT", G, ry)
+                grid:Show()
+                noteBox:ClearAllPoints()
+                noteBox:SetPoint("TOPLEFT", G + GRID_SPAN + 10, ry)
+                noteBox:Show()
+                sec3Line:Hide()
+                ry = ry - GRID_SPAN
+            else
+                grid:Hide()
+                noteBox:Hide()
+                sec3Line:ClearAllPoints()
+                sec3Line:SetPoint("TOPLEFT", G, ry)
+                local sh = sec3Line.text:GetStringHeight()
+                local lineH = max(SOURCE_LINE_H, (type(sh) == "number" and math.ceil(sh) or 0) + 4)
+                sec3Line:SetHeight(lineH)
+                sec3Line:Show()
+                ry = ry - lineH
+            end
+            secEnd[3] = ry
+            ry = ry - SECTION_GAP
+
+            pointer:ClearAllPoints()
+            pointer:SetPoint("TOPLEFT", G, ry)
+            ry = ry - (POINTER_H + 2)
+            addBtn:ClearAllPoints()
+            addBtn:SetPoint("TOPLEFT", G, ry)
+            addBtn:SetPoint("TOPRIGHT", -G, ry)
+            ry = ry - 32
+
+            sec2Ring:SetSpan(secTop[2], secEnd[2])
+            sec3Ring:SetSpan(secTop[3], secEnd[3])
+            local h = max(-ry + 2, 1)
+            host:SetHeight(h)
+            if h ~= paneH then
+                paneH = h
+                if opts.SetHeight then opts.SetHeight(h) end
+            end
+        end
+    end
+
     -- ── THE ONE RE-STATE ──
     -- ☠ EVERY LIVE READ IN THIS PANEL HAPPENS HERE, not in the builder. The panel
     -- is pooled and its build runs once, so "already added", the pool, the spec
@@ -6526,11 +6709,13 @@ S.BuildAddIndicatorPane = function(host, opts)
             sourceText:SetText(source.display or "")
             sourceText:SetTextColor(tc.r, tc.g, tc.b)
         else
-            sourceText:SetText(L["Choose an aura first."])
+            -- In the tab, section 2 says it over its tiles (opts.inline); saying
+            -- it twice, forty pixels apart, is noise.
+            sourceText:SetText(inline and "" or L["Choose an aura first."])
             sourceText:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
         end
-        spellBtn:SetActive(source ~= nil and source.kind == "spell")
-        filterBtn:SetActive(source ~= nil and source.kind == "filter")
+        if spellBtn then spellBtn:SetActive(source ~= nil and source.kind == "spell") end
+        if filterBtn then filterBtn:SetActive(source ~= nil and source.kind == "filter") end
         -- The spell's own artwork, on the tile that is about the spell's own
         -- artwork. Filters have no single icon; the shared filter glyph stands in.
         local iconTile = tiles.icon
@@ -6544,16 +6729,34 @@ S.BuildAddIndicatorPane = function(host, opts)
             end
         end
 
+        -- opts.inline, no aura yet: the block dims as ONE thing and takes no
+        -- clicks, under section 2's one line -- not nine tiles greyed one by one.
+        local blockDim = inline and not source
+        if tileBlock then tileBlock:SetAlpha(blockDim and 0.4 or 1) end
         for _, eff in ipairs(EFFECTS) do
             local tile = tiles[eff.type]
             if tile then
                 local state = "normal"
-                if not source or not Available(eff.type) or AlreadyHas(eff.type) then
+                if blockDim then
+                    state = "normal"
+                elseif not source or not Available(eff.type) or AlreadyHas(eff.type) then
                     state = "disabled"
                 elseif selected == eff.type then
                     state = "selected"
                 end
                 tile:SetTileState(state)
+                if inline then
+                    tile:EnableMouse(not blockDim)
+                    -- The reason, ON the tile, where the eye already is. The
+                    -- tooltip below still carries the long form.
+                    local caption
+                    if source and not Available(eff.type) then
+                        caption = L["Not for filters"]
+                    elseif source and AlreadyHas(eff.type) then
+                        caption = L["Added"]
+                    end
+                    tile:SetCaption(caption)
+                end
                 -- ☠ THE TOOLTIP IS WHERE A DIM TILE EXPLAINS ITSELF. A greyed
                 -- control with no reason given is the one people read as broken.
                 local lines = { eff.desc }
@@ -6617,12 +6820,35 @@ S.BuildAddIndicatorPane = function(host, opts)
         else
             gridNote:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
         end
+        -- opts.inline: the same sentence, on the line that replaces the grid.
+        if sec3Line then
+            sec3Line.text:SetText(selected and L["This effect changes the whole frame."]
+                                            or L["Pick a look above."])
+            if sec3NA then
+                sec3Line.text:SetTextColor(C_TEXT.r, C_TEXT.g, C_TEXT.b)
+            else
+                sec3Line.text:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
+            end
+        end
 
         local ready = (source and selected) and true or false
         addBtn:SetDisabled(not ready)
         -- The panel saying the form is finished. Shown for a pre-picked placed
         -- effect exactly as for a recolour -- both are answerable.
         if ready then pointer:Show() else pointer:Hide() end
+
+        -- Last, once every piece knows what it shows (opts.inline only).
+        if Relayout then Relayout(not source, placedPick) end
+    end
+
+    -- ── opts.restore: START FROM AN EARLIER BUILD'S ANSWERS ──
+    -- Taken as given and then judged by Sync like any other state, so a type the
+    -- world has since made unavailable or already-added drops out exactly as it
+    -- would under an open panel. A source of the route this build does not draw is
+    -- not carried: its answer line would name a route with no button.
+    local r = opts.restore
+    if type(r) == "table" and r.source and (not srcOnly or r.source.kind == srcOnly) then
+        source, selected, anchor = r.source, r.selected, r.anchor
     end
 
     Sync()
@@ -6632,6 +6858,11 @@ S.BuildAddIndicatorPane = function(host, opts)
     return {
         Sync = Sync, PickSpell = PickSpell, PickFilter = PickFilter,
         SelectType = SelectType, Commit = Commit,
+        -- The answers so far, for opts.restore. A fresh table each call; the
+        -- source record is shared, and nothing writes into it after it is made.
+        Snapshot = function()
+            return { source = source, selected = selected, anchor = anchor }
+        end,
     }
 end
 
@@ -8116,7 +8347,7 @@ local function pihBuildAddTiles(parent, yPos, Refresh)
     -- ── THE HEADING, AND ON STEP 2 THE WAY BACK OUT ──
     -- ☠ AN ✕ ON THE HEADING ROW, NOT A "Back" BUTTON UNDER THE GRID. Krathe, 2026-09-10:
     -- "no back use X like we do on the other AD effects." The designer's OWN picker is
-    -- directly above this function (S.BuildEffectsHeadArea's S.effectsPicker arm): a head
+    -- the split panel's old scope-picker column (retired 2026-09-22) used: a head
     -- frame with the question on the left and GUI:CreateCloseButton on the right, captioned
     -- there as "the only way out that does not commit to anything". This is the same
     -- question in the same place, so it is the same control -- and a Back button was a
@@ -8427,21 +8658,406 @@ S.BuildPIHelperBody = function(parent, opts)
     return yPos
 end
 
+-- ============================================================
+-- THE CLASSIC DESIGNER'S INLINE ADD FLOWS (2026-09-22)
+-- ------------------------------------------------------------
+-- The split panel's three add areas -- the Effects tab's three scope cards and the
+-- picker column they opened, and the Layout Groups / Debuffs tabs' choice-card
+-- blocks -- are gone. Each tab now carries one PICTURE TILE per source, directly
+-- on the page (S.BuildClassicAddTiles):
+--   Effects        Add from a Spell / Add from a Filter   runs S.BuildAddIndicatorPane
+--                                                         INSIDE the tab, in place of
+--                                                         the list (the flow below)
+--   Layout Groups  Spell Group / Filter Group             S.BuildAddLayoutGroupPane,
+--   Debuffs pool   Debuff Group                           S.BuildAddDebuffGroupPane,
+--                                                         mounted on the page (opts.
+--                                                         onPage): ONE CLICK ADDS
+-- One builder per surface, two hosts; nothing below re-implements a pane. The
+-- source the tile named is handed to the indicator pane (opts.source), so it never
+-- asks it again.
+--
+-- ☠ THE GROUP TILES ADD ON ONE CLICK (2026-09-22, second pass). The first pass ran
+-- the group panes as a flow too, with the chosen kind's picture and an Add button
+-- to press -- a confirm step for a question the tile had already answered. A group
+-- is created with defaults and edited in place, so there is nothing to confirm.
+--
+-- ☠ NOT A POPOUT. The first version of this (ffd4031c) docked the panes in a
+-- keyed popout beside the window; the author asked for the flow in the tab. The
+-- popout, its dock, its pin and its close rules are gone with it.
+--
+-- ⚠ THE FLOW IS STATE, AND THE TAB REBUILD DRAWS IT. S.classicAddFlow says which
+-- flow is running; S.SwitchTab -- the island's one refresh path -- asks
+-- S.SyncClassicAddFlow first, and the tab builders ask S.BuildClassicAddFlow
+-- before drawing their list. Entering, leaving and finishing are all a tab rebuild,
+-- never a page rebuild (ONE RETAINED BUILD PER MODE, GUI/Panel.lua).
+--
+-- ⚠ WHAT ENDS IT. The flow was started against one mode, pool and spec (the spec
+-- on My Buffs only), with the designer on. Any rebuild for another tab, or against
+-- a context that no longer matches, or with the designer off, ends it -- the pane's
+-- Add button would otherwise write into a pool the user has left. The page going
+-- away ends it too, and the next showing draws the list.
+-- ============================================================
+
+-- What a flow was started against. The spec only counts on My Buffs: Any Buff
+-- and Debuffs are shared across specs, so a spec change there moves nothing the
+-- flow shows.
+S.ClassicAddContext = function()
+    local shared = IsOtherTab() or IsDebuffTab()
+    return tostring((GUI and GUI.SelectedMode) or "party") .. "|" .. tostring(S.activeBuffTab)
+        .. "|" .. (shared and "-" or tostring(ResolveSpec()))
+end
+
+-- The designer-enabled gate, read from the MODE (see DF:IsAuraDesignerEnabledForMode).
+S.ClassicAddEnabled = function()
+    return (DF.IsAuraDesignerEnabledForMode
+        and DF:IsAuraDesignerEnabledForMode((GUI and GUI.SelectedMode) or "party")) and true or false
+end
+
+-- ☠ WHY AN ADD CANNOT HAPPEN HERE, OR NIL. My Buffs stores effects and layout
+-- groups PER SPEC, and a character whose spec the designer has no buff list for
+-- (any non-healer, or a character with no spec yet) resolves to NO spec -- where
+-- GetSpecAuras / GetSpecLayoutGroups hand back a fresh empty table on every call.
+-- An add there wrote into a table nobody kept: no error, nothing saved, nothing
+-- in the list (reported 2026-09-22 on a level 10 mage). So the flow says why and
+-- refuses up front. Any Buff and Debuffs are spec-independent; the helper's pool
+-- has its own gate.
+S.ClassicAddBlockReason = function(kind)
+    if kind == "debuff" then return nil end
+    if IsOtherTab() or IsDebuffTab() or IsPIHelperTab() then return nil end
+    if ResolveSpec() then return nil end
+    return L["No trackable spells found for this spec.\n\nYou can select a different spec using the dropdown above."]
+end
+
+-- The one gate every classic add tile asks on click: the designer on, and nothing
+-- blocking this kind of add. A block is SAID (the tile is greyed for it already;
+-- this is the belt to that brace). True when the add may go ahead.
+S.ClassicAddGate = function(kind)
+    if not S.ClassicAddEnabled() then return false end
+    local blocked = S.ClassicAddBlockReason(kind)
+    if blocked then
+        DF:Say(blocked)
+        return false
+    end
+    return true
+end
+
+-- The tab each flow runs in. Only the indicator add is a flow now; the group
+-- tiles add on one click (see the header).
+S.ClassicAddFlowTab = function(kind)
+    return (kind == "indicator") and "effects" or "layout"
+end
+
+-- The Effects tab's two source tiles. A VERB, not a file-scope table: every label
+-- is an L[...] lookup, and a table built at load freezes on the locale live then.
+-- The label is also the flow's heading once it is running.
+-- ⚠ THE ART IS THE LAYOUT GROUP TILES' VOCABULARY (Editor.lua's icon-row painter,
+-- published as P.PaintGroupIconRow): one of your frames with a row of icon squares
+-- on it. A spell is ONE square -- one aura you picked. A filter is the Filter
+-- Group's own picture, a uniform row -- many auras, drawn from one list.
+S.ClassicAddSourceDefs = function()
+    return {
+        { source = "spell",  label = L["Add from a Spell"],
+          desc = L["Any look, driven by one spell"],
+          colors = { { 0.45, 0.45, 0.95 } }, ghost = false },
+        { source = "filter", label = L["Add from a Filter"],
+          desc = L["The same frame changes, driven by a whole filter"],
+          colors = { { 0.30, 0.61, 0.36 }, { 0.30, 0.61, 0.36 }, { 0.30, 0.61, 0.36 } },
+          ghost = true },
+    }
+end
+
+-- Asked by S.SwitchTab's classic arm BEFORE it rebuilds: a flow that does not
+-- describe what is about to be drawn ends here, so the rebuild draws the list.
+S.SyncClassicAddFlow = function(tabKey)
+    -- Any classic rebuild is a fresh draw, so a "draw the list on the next showing"
+    -- left by the page's hide is spent (see S.WatchClassicAddPage).
+    S.classicAddFlowStale = nil
+    local flow = S.classicAddFlow
+    if not flow then return end
+    if tabKey ~= S.ClassicAddFlowTab(flow.kind)
+        or flow.ctx ~= S.ClassicAddContext()
+        or not S.ClassicAddEnabled() then
+        S.classicAddFlow = nil
+    end
+end
+
+-- Leave the flow for the list it came from, at the scroll the list was left at
+-- (S.SwitchTab clamps it). `rebuild` false: the caller rebuilds -- the panes' own
+-- Close runs this and their add verbs switch the tab straight after.
+-- ⚠ `kind` IS FOR THE BACK BUTTON: it rebuilds even when the flow has already
+-- ended under it, so Back always gets the user to the list.
+S.EndClassicAddFlow = function(rebuild, kind)
+    local flow = S.classicAddFlow
+    S.classicAddFlow = nil
+    if flow and S.tabScrollFrame and flow.listScroll then
+        S.tabScrollFrame:SetVerticalScroll(flow.listScroll)
+    end
+    kind = (flow and flow.kind) or kind
+    if rebuild and kind and S.SwitchTab then S.SwitchTab(S.ClassicAddFlowTab(kind)) end
+end
+
+-- One source tile's click. Refuses with the designer off, on the helper's pool
+-- (whose Effects tab keeps its own tiles), and with an add block, which it says.
+S.StartClassicAddFlow = function(kind, source)
+    -- The indicator add is the only flow; a group is one click (see the header).
+    if kind ~= "indicator" then return false end
+    if not S.ClassicAddEnabled() then return false end
+    if IsPIHelperTab() then return false end
+    if not S.ClassicAddGate(kind) then return false end
+    S.classicAddFlow = {
+        kind = kind, source = source, ctx = S.ClassicAddContext(),
+        listScroll = S.tabScrollFrame and S.tabScrollFrame:GetVerticalScroll() or nil,
+    }
+    S.SwitchTab(S.ClassicAddFlowTab(kind))
+    -- The flow starts at its top, wherever the list was scrolled to.
+    if S.tabScrollFrame then S.tabScrollFrame:SetVerticalScroll(0) end
+    return true
+end
+
+-- The two things outside S.SwitchTab that must still move a flow, watched once
+-- per frame:
+--   * THE PAGE GOING AWAY (another settings page, the window closing, a mode
+--     switch's rebuild). The flow ends, and the next showing draws the list.
+--   * THE COLUMN CHANGING WIDTH (a window resize). The pane was laid out for one
+--     width, so it is built again for the new one, from its own answers
+--     (opts.restore). Coalesced: a drag re-lays at most once per 0.15s.
+S.WatchClassicAddPage = function()
+    local rp = S.rightPanel
+    if rp and not rp.dfAddFlowHooked then
+        rp.dfAddFlowHooked = true
+        rp:HookScript("OnHide", function()
+            if S.classicAddFlow then
+                S.classicAddFlow = nil
+                S.classicAddFlowStale = true
+            end
+        end)
+        rp:HookScript("OnShow", function()
+            if not S.classicAddFlowStale then return end
+            S.classicAddFlowStale = nil
+            if S.rightPanel == rp and not S.rowsMode and S.SwitchTab then
+                S.SwitchTab(S.activeTab or "effects")
+            end
+        end)
+    end
+    local cf = S.tabContentFrame
+    if cf and not cf.dfAddFlowSizeHooked then
+        cf.dfAddFlowSizeHooked = true
+        -- ☠ COMPARE LIKE WITH LIKE. flow.width is the PANE's width, which is the
+        -- column's less the pane inset on both sides; comparing the column's own
+        -- width against it never matched, so every size event (a height change
+        -- included) rebuilt the pane. flow.parentWidth is the column width the
+        -- pane was built for.
+        cf:HookScript("OnSizeChanged", function(self, w)
+            local flow = S.classicAddFlow
+            if not (flow and flow.parentWidth and w) or math.abs(w - flow.parentWidth) < 1 then return end
+            if flow.relayoutPending or not (C_Timer and C_Timer.After) then return end
+            flow.relayoutPending = true
+            C_Timer.After(0.15, function()
+                flow.relayoutPending = nil
+                if S.classicAddFlow ~= flow or S.tabContentFrame ~= self then return end
+                if math.abs((self:GetWidth() or 0) - flow.parentWidth) < 1 then return end
+                S.SwitchTab(S.ClassicAddFlowTab(flow.kind))
+            end)
+        end)
+    end
+end
+
+-- One tab's add tiles, at the top of its head area, as pictures side by side.
+-- Returns the y to continue at.
+--   indicator  Add from a Spell / Add from a Filter -- each starts the flow below
+--   layout     S.BuildAddLayoutGroupPane, mounted on the page: Spell Group / Filter
+--              Group (one click adds), and the Create / Manage Filters pair under them
+--   debuff     S.BuildAddDebuffGroupPane, mounted likewise: Debuff Group
+-- ⚠ THE SAME TILE, THE SAME SIZE, ON ALL THREE TABS: CreateFrameTile at half the
+-- column, a 40px picture (Editor.lua's P.GroupTileMetrics), so the three tabs read
+-- as one control.
+S.BuildClassicAddTiles = function(parent, yPos, kind)
+    -- The section's own title above its tiles, in the helper pool's style (the
+    -- small dim caps line its add area has always carried).
+    local headText = (kind == "indicator") and L["ADD AN INDICATOR"]
+        or ((kind == "debuff") and L["ADD A DEBUFF GROUP"] or L["ADD A LAYOUT GROUP"])
+    local head = parent:CreateFontString(nil, "OVERLAY", "DFFontHighlightSmall")
+    if GUI.SetSettingsFont then GUI:SetSettingsFont(head, 9, "") end
+    head:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, yPos)
+    head:SetText(headText)
+    head:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
+    yPos = yPos - 18
+    local blocked = S.ClassicAddBlockReason(kind)
+    local enabled = S.ClassicAddEnabled() and not blocked
+    local colW = floor((parent:GetWidth() or 0) - 16)
+    if colW < 200 then colW = GUI.PopoutContentWidth or 260 end
+    local host = CreateFrame("Frame", nil, parent)
+    host:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, yPos)
+    host:SetWidth(colW)
+    host:SetHeight(1)
+    local h
+    if kind == "indicator" then
+        local m = P.GroupTileMetrics or { picH = 40, gap = 6 }
+        local tileW = floor((colW - m.gap) / 2)
+        local rowH = 0
+        for i, def in ipairs(S.ClassicAddSourceDefs()) do
+            local colors, ghost, source = def.colors, def.ghost, def.source
+            local tile = CreateFrameTile(host, {
+                width = tileW, picHeight = m.picH,
+                label = def.label,
+                tooltip = { title = def.label, lines = { def.desc } },
+                Paint = function(pv)
+                    if P.PaintGroupIconRow then P.PaintGroupIconRow(pv, colors, ghost) end
+                end,
+                -- ⚠ THE GATE, TWICE. The tile is greyed below, and the starter
+                -- re-checks (and says why) besides.
+                onClick = function() S.StartClassicAddFlow(kind, source) end,
+            })
+            tile:SetPoint("TOPLEFT", (i - 1) * (tileW + m.gap), 0)
+            if not enabled then tile:SetTileState("disabled") end
+            rowH = max(rowH, tile.layoutHeight or 68)
+        end
+        h = rowH
+        host:SetHeight(h)
+    else
+        -- The group panes, on the page. Their tiles add on click (opts.gate asks
+        -- the same questions the indicator tiles do), so nothing here is a flow.
+        local Build = (kind == "debuff") and S.BuildAddDebuffGroupPane or S.BuildAddLayoutGroupPane
+        h = Build and Build(host, {
+            width = colW, onPage = true, blocked = not enabled,
+            gate = function() return S.ClassicAddGate(kind) end,
+        }) or 0
+    end
+    S.WatchClassicAddPage()
+    yPos = yPos - ((h or 0) + 10)
+    -- The reason the tiles are greyed, said where the eye already is.
+    if blocked then
+        local note = parent:CreateFontString(nil, "OVERLAY", "DFFontHighlightSmall")
+        note:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, yPos)
+        note:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+        note:SetJustifyH("LEFT")
+        note:SetWordWrap(true)
+        note:SetText(blocked)
+        note:SetTextColor(C_TEXT_DIM.r, C_TEXT_DIM.g, C_TEXT_DIM.b)
+        yPos = yPos - (math.ceil(note:GetStringHeight() or 28) + 12)
+    end
+    return yPos
+end
+
+-- Draw the running flow into its tab, in place of the list. Returns true when it
+-- did, and the tab builder then draws nothing else.
+--
+-- ⚠ THE PANE IS BUILT ONCE PER FLOW AND KEPT. ClearTabContent hides and unanchors
+-- it on every rebuild; a rebuild at the same width re-anchors and re-shows the SAME
+-- pane, re-synced (a kept pane is stale the moment the world moves under it), so an
+-- aura already picked survives. A new width, or a new page build, builds it again
+-- from the old pane's answers.
+S.BuildClassicAddFlow = function(parent, kind)
+    local flow = S.classicAddFlow
+    if not (flow and parent and flow.kind == kind) then return false end
+    S.WatchClassicAddPage()
+    local accent = GetThemeColor()
+    local y = -10
+
+    -- ── < BACK TO EFFECTS ──
+    -- The only way out that commits nothing. A ghost button, not a close glyph: it
+    -- says where it goes, which a bare X over a whole tab would not.
+    -- (The indicator add is the only flow; the group tiles add on one click.)
+    local backLabel = L["Back to Effects"]
+    local back = CreateFrame("Button", nil, parent, "BackdropTemplate")
+    back:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, y)
+    GUI:StyleButton(back, {
+        width = 170, height = 24, ghost = true, align = "left",
+        icon = { texture = "Interface\\AddOns\\DandersFrames\\Media\\Icons\\chevron_left", size = 14 },
+        text = backLabel,
+    })
+    back:SetScript("OnClick", function() S.EndClassicAddFlow(true, kind) end)
+    y = y - 30
+
+    -- ── THE CHOSEN SOURCE, AS THE FLOW'S HEADING ──
+    -- The label of the tile that started it, so the words the user clicked are
+    -- the words they land on.
+    local heading
+    for _, def in ipairs(S.ClassicAddSourceDefs()) do
+        if def.source == flow.source then heading = def.label end
+    end
+    local title = parent:CreateFontString(nil, "OVERLAY", "DFFontHighlight")
+    title:SetPoint("TOPLEFT", parent, "TOPLEFT", 8, y)
+    title:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+    title:SetJustifyH("LEFT")
+    title:SetWordWrap(false)
+    title:SetText(heading or "")
+    title:SetTextColor(accent.r, accent.g, accent.b)
+    y = y - 24
+
+    -- ── THE PANE ──
+    -- ☠ TWO LEFT EDGES THAT LAND ON ONE. The indicator pane insets its controls by
+    -- its own 6px gutter (the room its section outline is drawn in), so its host
+    -- starts 2px in, and every control lines up with the Back button above.
+    local inset = 2
+    local W = floor((parent:GetWidth() or 0) - inset * 2)
+    if W < 200 then W = GUI.PopoutContentWidth or 260 end
+
+    -- Where the pane starts in the column, for the height it reports later.
+    flow.hostTop = y
+    local host = flow.host
+    local restore
+    if host and (host:GetParent() ~= parent or flow.width ~= W) then
+        restore = flow.api and flow.api.Snapshot and flow.api.Snapshot() or nil
+        host:Hide()
+        host = nil
+    end
+    if host then
+        host:SetPoint("TOPLEFT", parent, "TOPLEFT", inset, y)
+        host:Show()
+        if flow.api and flow.api.Sync then flow.api.Sync() end
+    else
+        host = CreateFrame("Frame", nil, parent)
+        host:SetPoint("TOPLEFT", parent, "TOPLEFT", inset, y)
+        host:SetWidth(W)
+        local paneOpts = {
+            width = W,
+            source = flow.source, fitWidth = true, restore = restore,
+            -- The pane grows and shrinks as its sections do (opts.inline), and
+            -- says so here: the column follows, and a scroll left past the new
+            -- end is pulled back, so the page neither jumps nor leaves a gap.
+            inline = true,
+            SetHeight = function(h)
+                if S.classicAddFlow ~= flow then return end
+                local p = host:GetParent()
+                if not p then return end
+                p:SetHeight(max(-(flow.hostTop or 0) + h + 20, 200))
+                local sf = S.tabScrollFrame
+                if sf and sf.GetVerticalScrollRange then
+                    sf:SetVerticalScroll(min(sf:GetVerticalScroll(), sf:GetVerticalScrollRange()))
+                end
+            end,
+            -- The pane closes itself before its add verb switches the tab.
+            Close = function()
+                if S.classicAddFlow == flow then S.EndClassicAddFlow(false) end
+            end,
+        }
+        flow.api = nil
+        flow.host = host
+        flow.api = S.BuildAddIndicatorPane(host, paneOpts)
+        flow.width = W
+    end
+    flow.parentWidth = parent:GetWidth() or 0
+    y = y - (host:GetHeight() or 0)
+
+    parent:SetHeight(max(-y + 20, 200))
+    return true
+end
+
 -- ☠ EXTRACTED, NOT COPIED. The popout layout's row page (AuraDesigner/UI/Rows.lua)
 -- mounts exactly this furniture above its band of effect rows. The add flow is a
 -- later phase of the designer rework, and a second copy of it here would be a
 -- second place to change when that phase lands -- which is how the three
 -- duplicated FRAME_ITEMS lists below came about in the first place.
 --
--- Returns the y the caller should continue at, and `true` when the picker has
--- taken the column over, in which case the caller must add nothing below it.
+-- Returns the y the caller should continue at, and a second value that is always
+-- false now. It used to be `true` when the split panel's picker column had taken
+-- the column over; that column is gone, and the value stays so neither caller has
+-- to change shape.
 S.BuildEffectsHeadArea = function(parent, yPos, opts)
     local tc = GetThemeColor()
-    -- ☠ opts.skipAddBlock: THE ROW LAYOUT HAS NO ADD BLOCK ON THE PAGE. Phase 5
-    -- moved the three scope cards and the picker column they open into the panel
-    -- behind one "+ Add Indicator" row (S.BuildAddIndicatorPane above). The split
-    -- panel still draws the block: it is the one surface with 230px to spend on
-    -- standing furniture.
+    -- ☠ opts.skipAddBlock: THE ROW LAYOUT HAS ITS OWN "+ Add Indicator" ROW, so it
+    -- asks for neither the classic add tiles nor the helper's tiles here.
     local skipAdd = opts and opts.skipAddBlock or false
     -- ☠ opts.skipChips: THE ROW LAYOUT'S FILTER IS NOT A CHIP FLOW. The eight
     -- chips live in a popout there, so in that layout this function draws only the
@@ -8465,113 +9081,18 @@ S.BuildEffectsHeadArea = function(parent, yPos, opts)
     local COL_W = (hostW > 40) and (hostW - 16) or nil
 
     -- ══ ADDING AN INDICATOR ══════════════════════════════════════════════
-    -- NOT one flat list of the fourteen types: fourteen entries is a long column at
-    -- card height, and the "from a filter" ones repeat five labels from the section
-    -- above word for word -- only the heading told them apart.
+    -- ☠ TWO PICTURE TILES, AND THE FLOW BEHIND THEM IS THE MODERN ONE (2026-09-22).
+    -- The three pinned scope cards and the picker column they took over are gone: Add
+    -- from a Spell / Add from a Filter run S.BuildAddIndicatorPane -- which aura,
+    -- how it should look, where it goes -- INSIDE this tab, in place of the list,
+    -- with the route already chosen. See THE CLASSIC DESIGNER'S INLINE ADD FLOWS
+    -- above.
     --
-    -- So the choice is split in two. Three pinned scope cards say what KIND of
-    -- change you want; picking one takes the column over with just that scope's
-    -- options, each with room for a description. No duplicate labels can appear,
-    -- because a scope is settled before any type is shown.
-    -- ONE definition, two layouts: the panel above and this block build their
-    -- cards from the same three lists, so a type added to one appears in both.
-    local SCOPES = AddFlowScopes()
-
-    -- The picker is a transient mode, so it must not outlive the thing it was
-    -- opened against. Anything that changes which pool or spec is on screen
-    -- rebuilds this tab, and the context check below drops a stale picker on
-    -- that rebuild rather than leaving the player staring at options for a pool
-    -- they have already left.
-    -- ⚠ THE POOL KEY, NOT IsOtherTab(). That predicate answers true for BOTH the Any Buff and
-    -- the Power Infusion Helper pools, so a picker opened on one survived a switch to the
-    -- other -- the designer's spell-picker column drawn over a pool that has no spell to pick.
-    -- The context has to change whenever the thing it was opened against changes, and the pool
-    -- key is that thing.
-    local pickerCtx = tostring(S.activeBuffTab) .. "|" .. tostring(ResolveSpec())
-    if S.effectsPicker and S.effectsPickerCtx ~= pickerCtx then
-        S.effectsPicker = nil
-    end
-
-    local function StartType(itemType, scope, anchor)
-        S.effectsPicker = nil
-        if scope == "filter" then
-            -- The effect hangs off the FILTER: its record is stored under the
-            -- "@preset:"/"@custom:" key, which DF:BuildADIdentityFilters resolves
-            -- to the filter's whole spell set. Nothing downstream changes.
-            OpenFilterPicker({
-                anchor = anchor,
-                isLinked = function(kind, key)
-                    local ref = DF:MakeADFilterRef(kind, key)
-                    return ref ~= nil and HasFrameEffect(ref, itemType) or false
-                end,
-                onPick = function(kind, key)
-                    local ref = DF:MakeADFilterRef(kind, key)
-                    if not ref then return end
-                    AddPickedSpell(ref, itemType, "frame")
-                    S.SwitchTab("effects")
-                    RefreshPlacedIndicators()
-                    RefreshPreviewEffects()
-                end,
-            })
-            return
-        end
-        OpenIndicatorPicker(itemType, scope)
-    end
-
-    -- ── PICKER MODE: the column belongs to one scope's options ──
-    -- ...and the row layout never enters it. Its scope cards live in a panel, so
-    -- nothing on that page can set S.effectsPicker; the guard is belt and braces
-    -- against the flag being left set by a visit to the split panel.
-    if S.effectsPicker and not skipAdd then
-        local scope = SCOPES[S.effectsPicker]
-        local scopeKey = S.effectsPicker
-
-        local head = CreateFrame("Frame", nil, parent)
-        head:SetHeight(22)
-        head:SetPoint("TOPLEFT", 8, yPos)
-        head:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
-
-        local headText = head:CreateFontString(nil, "OVERLAY", "DFFontHighlightSmall")
-        headText:SetPoint("LEFT", 0, 0)
-        headText:SetText(scope.title)
-        headText:SetTextColor(C_TEXT.r, C_TEXT.g, C_TEXT.b)
-
-        -- The only way out that does not commit to anything.
-        local close = GUI:CreateCloseButton(head, { size = 18, iconSize = 11 })
-        close:SetPoint("RIGHT", 0, 0)
-        close:SetScript("OnClick", function()
-            S.effectsPicker = nil
-            S.SwitchTab("effects")
-        end)
-        yPos = yPos - 26
-
-        for _, item in ipairs(scope.items) do
-            local bc = BADGE_COLORS[item.type]
-            local capturedType = item.type
-            -- Sound changes nothing on the frame, so it gets the untouched mock
-            -- frame -- which is the honest picture of what it does.
-            local art = (item.type ~= "sound")
-                and { kind = item.type, color = { bc.r, bc.g, bc.b } } or nil
-            local card = GUI:CreateChoiceCard(parent, {
-                title = item.label, desc = item.desc, art = art, accent = bc,
-                width = COL_W,
-                onClick = function(self) StartType(capturedType, scopeKey, self) end,
-            })
-            card:SetPoint("TOPLEFT", 8, yPos)
-            card:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
-            yPos = yPos - (card.layoutHeight + 6)
-        end
-
-        parent:SetHeight(max(-yPos + 20, 200))
-        return yPos, true
-    end
-
-    -- ── THE HELPER'S POOL: TILES, NOT SCOPE CARDS ──
-    -- ☠ THE THREE SCOPE CARDS ANSWER A QUESTION THIS POOL HAS ALREADY ANSWERED. Placed /
-    -- Frame-Level / From a Filter all end in "now pick a spell", and the helper's spell is the
-    -- cooldown list its Triggers tab owns. Offering the picker here would let someone hang a
-    -- helper effect off a spell of their own, which is not a helper effect at all -- it is an
-    -- Any Buff effect that happens to have been created from the wrong tab.
+    -- ── THE HELPER'S POOL: TILES, NOT THE PANEL ──
+    -- ☠ THE PANEL ASKS A QUESTION THIS POOL HAS ALREADY ANSWERED. Its first step is
+    -- "which aura?", and the helper's aura is the cooldown list its Triggers tab owns.
+    -- Offering the picker here would let someone hang a helper effect off a spell of
+    -- their own, which is not a helper effect at all.
     -- ⚠ EVERYTHING BELOW THIS BRANCH IS SHARED, and that is the point. The ACTIVE INDICATORS
     -- caption, the type filter and the effect cards under it are the designer's own, so the
     -- helper's list looks and behaves exactly like the designer's list -- which is what Krathe
@@ -8580,65 +9101,7 @@ S.BuildEffectsHeadArea = function(parent, yPos, opts)
         yPos = S.BuildPIHelperAddArea(parent, yPos, function() S.SwitchTab("effects") end)
         yPos = yPos - 4
     elseif not skipAdd then
-
-    -- ── NORMAL: three pinned scope cards ──
-    local addBlock = GUI:CreateChoiceCardGroup(parent, {
-        title    = L["ADD AN INDICATOR"],
-        accent   = tc,
-        width    = COL_W,
-        onToggle = function() S.SwitchTab("effects") end,
-        cards = {
-            {
-                title = SCOPES.placed.title, desc = SCOPES.placed.desc,
-                art   = { kind = "icon", color = { tc.r, tc.g, tc.b } },
-                onClick = function()
-                    S.effectsPicker, S.effectsPickerCtx = "placed", pickerCtx
-                    S.SwitchTab("effects")
-                end,
-            },
-            {
-                title = SCOPES.frame.title, desc = SCOPES.frame.desc,
-                art   = { kind = "border", color = { tc.r, tc.g, tc.b } },
-                onClick = function()
-                    S.effectsPicker, S.effectsPickerCtx = "frame", pickerCtx
-                    S.SwitchTab("effects")
-                end,
-            },
-            {
-                -- Filter green, the colour Aura Filters owns everywhere else: the
-                -- effects are identical to the card above, only the source differs.
-                title = SCOPES.filter.title, desc = SCOPES.filter.desc,
-                art   = { kind = "border", color = { 0.51, 0.86, 0.51 } },
-                onClick = function()
-                    S.effectsPicker, S.effectsPickerCtx = "filter", pickerCtx
-                    S.SwitchTab("effects")
-                end,
-                -- The ONLY card in this block about filters, which is why the route
-                -- to the library is here and not on the block header.
-                --
-                -- ⚠ The filter glyph, not the edit pencil, and no filter argument.
-                -- Nothing is chosen yet on this card -- it creates an effect and then
-                -- asks which filter -- so there is no "this filter" to open. The
-                -- pencils elsewhere target one named filter; this opens the library.
-                -- Same distinction the tooltip draws.
-                action = {
-                    -- ☠ Extension included: CreateChoiceCard concatenates this onto
-                    -- the Icons path verbatim, and a PNG needs it.
-                    icon    = "filter_list.png",
-                    tooltip = {
-                        title = L["Manage Filters"],
-                        lines = { L["Build and edit your buff filters in the Filter Designer."] },
-                    },
-                    onClick = function()
-                        if GUI.OpenFilterInDesigner then GUI:OpenFilterInDesigner() end
-                    end,
-                },
-            },
-        },
-    })
-    addBlock:SetPoint("TOPLEFT", 8, yPos)
-    addBlock:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
-    yPos = yPos - (addBlock.layoutHeight + 10)
+        yPos = S.BuildClassicAddTiles(parent, yPos, "indicator")
     end
 
     -- ── POWER INFUSION HELPER: MOVED OUT, 2026-09-08 ──
@@ -8773,6 +9236,10 @@ end
 S.BuildEffectsTab = function()
     if not S.tabContentFrame then return end
     local parent = S.tabContentFrame
+    -- A running add flow takes the tab over in place of the list (THE CLASSIC
+    -- DESIGNER'S INLINE ADD FLOWS). Never on the helper's pool: S.StartClassicAddFlow
+    -- refuses there, and a pool switch ends any flow before this runs.
+    if S.BuildClassicAddFlow and S.BuildClassicAddFlow(parent, "indicator") then return end
     local yPos, pickerOpen = S.BuildEffectsHeadArea(parent, -10)
     -- The picker sized the column itself and owns the whole of it.
     if pickerOpen then return end
@@ -8823,7 +9290,11 @@ S.BuildEffectsTab = function()
         if not IsOtherTab() and (not spec or not specAuras or #specAuras == 0) then
             empty:SetText(L["No trackable spells found for this spec.\n\nYou can select a different spec using the dropdown above."])
         elseif S.activeFilter == "all" then
-            empty:SetText(L["No effects configured yet.\nPick a style above to get started."])
+            -- The helper's pool has tiles above ("a style"); every other pool has the
+            -- Add from a Spell / Add from a Filter buttons.
+            empty:SetText(IsPIHelperTab()
+                and L["No effects configured yet.\nPick a style above to get started."]
+                or  L["No effects configured yet.\nAdd one from a spell or a filter above."])
         else
             empty:SetText(format(L["No %s effects configured."], (S.PLACED_TYPE_LABELS[S.activeFilter] or S.FRAME_LEVEL_LABELS[S.activeFilter] or S.activeFilter)))
         end

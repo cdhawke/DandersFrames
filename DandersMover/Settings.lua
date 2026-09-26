@@ -10,9 +10,12 @@ if not NS.Lib then return end
 -- (snapping, grid size) lands here, which is where a set-once preference
 -- belongs.
 --
--- Laid out as titled group boxes in the DandersFrames settings style:
--- Snapping, Editor, Registered addons. Rows inside a box stack on the theme's
--- slot heights (UI.RowHeight), so the rhythm matches the options pages.
+-- Laid out as titled group boxes in the DandersFrames settings style: Scale on
+-- its own row under the title, then Snapping, Grid, Editor and Registered
+-- addons. Rows inside a box stack on the theme's slot heights (UI.RowHeight),
+-- so the rhythm matches the options pages. Two columns when the screen has the
+-- room -- settings left, Registered addons right -- one column when it does
+-- not (see LAYOUT).
 -- ============================================================
 local St = {}
 NS.Settings = St
@@ -32,6 +35,8 @@ local LIST_ROW = 26                       -- one toggle row in the addon list
 local LIST_HEADING = 16                   -- a group subheading between element rows
 local CHECK_CONTENT_TOP, CHECK_CONTENT_H = 3, 18   -- where the check sits inside its 35px slot
 local SEG_GAP = 2                         -- between segmented buttons
+local COL_GAP = PAD                       -- between the two columns
+local W2 = INNER * 2 + PAD * 2 + COL_GAP  -- the two-column window
 
 local function rebuildProxies()
     Sess:RebuildProxies()
@@ -121,6 +126,69 @@ local function segmentedRow(parent, label, options, get, set)
 end
 
 -- ============================================================
+-- LAYOUT
+-- Two columns when the screen is wide enough for them at the current chrome
+-- scale: the settings boxes stacked on the left, Registered addons on the
+-- right, its list stretched to the height of the left column so the two
+-- bottoms line up (the list is the one thing in the window that wants the
+-- room). Otherwise one column, the list under the settings at LIST_H, as it
+-- always was. Tester request (alpha.12), after DandersFrames' own options.
+--
+-- Re-run on every show and every scale change: the window is scaled, so how
+-- much screen it has is the screen's width in ITS units. Only positions and
+-- two sizes move -- the addon list's rows are cached by identity and keep
+-- their width (the column is the same width either way), so a relayout
+-- creates nothing.
+-- ============================================================
+local function wantsTwoColumns()
+    local sw = UIParent:GetWidth()
+    if type(sw) ~= "number" then return false end
+    return sw / chromeScale() >= W2 + PAD * 2
+end
+
+local function layout(f)
+    local two = wantsTwoColumns()
+    f.twoColumns = two
+    local width = two and W2 or W
+    f:SetWidth(width)
+    local y = f.columnsTop
+    f.scaleSlider:ClearAllPoints()
+    f.scaleSlider:SetPoint("TOPLEFT", f, "TOPLEFT", PAD * 2, f.scaleTop)
+    f.scaleSlider:SetWidth(width - PAD * 4)
+    -- Left column.
+    for _, box in ipairs(f.leftBoxes) do
+        box:ClearAllPoints()
+        box:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, y)
+        y = y - box:GetHeight() - UI.Space.section
+    end
+    local leftBottom = y + UI.Space.section          -- the last box's bottom edge
+    local addons = f.addonsBox
+    -- The box's own chrome (title strip, padding) around its content.
+    addons:SetContentHeight(LIST_H)
+    local chrome = addons:GetHeight() - LIST_H
+    local listH = LIST_H
+    addons:ClearAllPoints()
+    if two then
+        listH = max(LIST_H, (f.columnsTop - leftBottom) - chrome)
+        addons:SetPoint("TOPLEFT", f, "TOPLEFT", PAD + INNER + COL_GAP, f.columnsTop)
+    else
+        addons:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, y)
+    end
+    f.scroll:SetSize(CONTENT - SCROLLBAR_W, listH)
+    addons:SetContentHeight(listH)
+    local bottom = two and (f.columnsTop - addons:GetHeight()) or (y - addons:GetHeight())
+    if two and leftBottom < bottom then bottom = leftBottom end
+    f:SetHeight(-bottom + PAD)
+end
+
+-- A window build() made. rawget, because the lifecycle suite
+-- (test_settings_window.lua) stands the window in with a bare stub frame whose
+-- unknown fields answer a truthy no-op.
+local function relayout(f)
+    if rawget(f, "addonsBox") then layout(f) end
+end
+
+-- ============================================================
 -- BUILD
 -- ============================================================
 local function build()
@@ -151,10 +219,25 @@ local function build()
     f.title:SetWordWrap(false)
 
     local y = -(PAD + TITLE_H + GAP)
-    local function place(box)
-        box:SetPoint("TOPLEFT", PAD, y)
-        y = y - box:GetHeight() - UI.Space.section
-    end
+    -- The settings boxes, top to bottom; layout() places them (and the list).
+    f.leftBoxes = {}
+    local function place(box) tinsert(f.leftBoxes, box) end
+
+    -- ---- Scale: its own row, first thing under the title ---------------
+    -- It sizes this very window (and the strip, the panel, the toast and the
+    -- text on the slabs -- see NS:ChromeScale), so it is the one control that
+    -- has to be findable at a glance. It used to sit last in the Editor box, at
+    -- the bottom of the window (tester report, alpha.12).
+    f.scaleSlider = UI:CreateSlider(f, {
+        label = L["Scale"], min = 0.5, max = 1.5, step = 0.05,
+        tooltip = { title = L["Scale"],
+                    lines = { L["Size of the top strip, the element panel, this window and the text on the movers. Movers themselves always match their frames."] } },
+        get = function() return NS.db.scale end,
+        set = function(v) NS.db.scale = v end,
+        onChanged = function() if Proxy and Proxy.ApplyChromeScale then Proxy:ApplyChromeScale() end end,
+    })
+    f.scaleTop = y
+    f.columnsTop = y - (f.scaleSlider.preferredHeight or UI.RowHeight.slider or 50) - TIGHT
 
     f.cb = {}
     local function toggle(parent, label, key, after, tooltip)
@@ -169,12 +252,6 @@ local function build()
 
     -- ---- Snapping ---------------------------------------------------
     local snap = UI:CreateGroupBox(f, { title = L["Snapping"], width = INNER })
-    f.gridSlider = UI:CreateSlider(snap.content, {
-        label = L["Grid Size"], min = 10, max = 100, step = 5,
-        get = function() return NS.db.gridSize end,
-        set = function(v) NS.db.gridSize = v end,
-        onChanged = function() Grid:Refresh() end,
-    })
     -- Fixed distance, so the pull is the same for a raid container and a lone icon.
     -- 0 still snaps on a genuine overlap (gap 0), it just kills the reach.
     f.snapDistSlider = UI:CreateSlider(snap.content, {
@@ -204,11 +281,45 @@ local function build()
         -- rather than at the next drag.
         toggle(snap.content, L["Show distance measures"], "showMeasures", function() Grid:HideMeasure() end),
         toggle(snap.content, L["Show grid snap lines"], "showSnapPreview", function() Grid:HidePreview() end),
-        f.gridSlider,
         f.snapDistSlider,
         f.zoneShowSlider,
     })
     place(snap)
+
+    -- ---- Grid -------------------------------------------------------
+    -- How the grid LOOKS, and the dim behind it. Every change redraws live.
+    local gridBox = UI:CreateGroupBox(f, { title = L["Grid"], width = INNER })
+    f.gridSlider = UI:CreateSlider(gridBox.content, {
+        label = L["Grid Size"], min = 10, max = 100, step = 5,
+        get = function() return NS.db.gridSize end,
+        set = function(v) NS.db.gridSize = v end,
+        onChanged = function() Grid:Refresh() end,
+    })
+    -- Device pixels; Grid.lua snaps each line to whole pixels.
+    f.thickSlider = UI:CreateSlider(gridBox.content, {
+        label = L["Grid line thickness"], min = 1, max = 5, step = 1,
+        get = function() return NS.db.gridThickness end,
+        set = function(v) NS.db.gridThickness = v end,
+        onChanged = function() Grid:Refresh() end,
+    })
+    f.dimSlider = UI:CreateSlider(gridBox.content, {
+        label = L["Dim amount"], min = 0.1, max = 0.9, step = 0.05,
+        get = function() return NS.db.dimAlpha end,
+        set = function(v) NS.db.dimAlpha = v end,
+        onChanged = function() Grid:Refresh() end,
+    })
+    -- Grey-when-disabled: the amount means nothing with the dim off.
+    local function gateDim() f.dimSlider:SetEnabled(NS.db.dimBackground and true or false) end
+    f.gateDim = gateDim
+    stack(gridBox, {
+        f.gridSlider,
+        f.thickSlider,
+        toggle(gridBox.content, L["Dim background"], "dimBackground", function() Grid:Refresh(); gateDim() end,
+            { title = L["Dim background"], lines = { L["Darkens the game world behind the grid while the movers are open, so the grid and your frames stand out."] } }),
+        f.dimSlider,
+    })
+    gateDim()
+    place(gridBox)
 
     -- ---- Editor -----------------------------------------------------
     local editor = UI:CreateGroupBox(f, { title = L["Editor"], width = INNER })
@@ -216,16 +327,15 @@ local function build()
         { { value = "auto", text = L["Auto"] }, { value = "left", text = L["Left"] }, { value = "right", text = L["Right"] } },
         function() return NS.db.panelSide end,
         function(v) NS.db.panelSide = v; if NS.Panel then NS.Panel:Refresh() end end)
-    -- The session chrome's size -- strip, panel, toast, this window. Never the
-    -- slabs (see NS:ChromeScale). Committed on release, so the window is not
-    -- re-scaled under the cursor on every notch of the drag.
-    f.scaleSlider = UI:CreateSlider(editor.content, {
-        label = L["Scale"], min = 0.5, max = 1.5, step = 0.05,
-        tooltip = { title = L["Scale"],
-                    lines = { L["Size of the top strip, the element panel and this window. Movers themselves always match their frames."] } },
-        get = function() return NS.db.scale end,
-        set = function(v) NS.db.scale = v end,
-        onChanged = function() if Proxy and Proxy.ApplyChromeScale then Proxy:ApplyChromeScale() end end,
+    -- The slabs' fill only; applied live (the mover host has no drag hooks, so
+    -- onChanged runs on every step of the drag).
+    f.opacitySlider = UI:CreateSlider(editor.content, {
+        label = L["Mover Opacity"], min = 0.1, max = 1, step = 0.05,
+        tooltip = { title = L["Mover Opacity"],
+                    lines = { L["How solid the movers are. Lower it to see the frames underneath; outlines, colours and names stay at full strength."] } },
+        get = function() return NS.db.moverOpacity end,
+        set = function(v) NS.db.moverOpacity = v end,
+        onChanged = function() if Proxy and Proxy.ApplyOpacity then Proxy:ApplyOpacity() end end,
     })
     stack(editor, {
         toggle(editor.content, L["Keyboard nudge"], "keyboardNudge", nil,
@@ -237,7 +347,7 @@ local function build()
         -- anchor targets but not draggable unless this is on. Mirrored on the legend.
         toggle(editor.content, L["Show other addons' movers"], "showOtherAddons", rebuildProxies),
         f.sideRow,
-        f.scaleSlider,
+        f.opacitySlider,
     })
     place(editor)
 
@@ -250,14 +360,17 @@ local function build()
     local content = CreateFrame("Frame", nil, scroll)
     content:SetSize(CONTENT - SCROLLBAR_W, 10)
     scroll:SetScrollChild(content)
-    addons:SetContentHeight(LIST_H)
-    place(addons)
+    f.addonsBox, f.scroll = addons, scroll
     f.content = content
     f.listWidth = CONTENT - SCROLLBAR_W
     f.rows = {}
+    f.rowCache = {}               -- identity key -> row frame; see ROWS ARE CACHED
     f.expanded = {}
 
-    f:SetHeight(-y - UI.Space.section + PAD)
+    layout(f)
+    -- Every slider, for Refresh to re-read.
+    f.sliders = { f.snapDistSlider, f.zoneShowSlider, f.gridSlider, f.thickSlider, f.dimSlider,
+                  f.opacitySlider, f.scaleSlider }
     return f
 end
 
@@ -269,57 +382,91 @@ local function clearRows(f)
     wipe(f.rows)
 end
 
--- One toggle row. Rows are hidden rather than destroyed -- frames cannot be
--- garbage-collected -- and re-created on each refresh, because this list
--- rebuilds on every expand.
-local function addRow(f, parent, y, indent, label, get, set, expandable, expandedKey)
-    local r = CreateFrame("Frame", nil, parent)
-    r:SetSize(f.listWidth, LIST_ROW)
+-- ☠ ROWS ARE CACHED BY IDENTITY, NEVER RE-CREATED. Frames cannot be
+-- garbage-collected, and this list redraws on every open, every expand and every
+-- registry burst (DandersFrames re-registers its targets on each unlock and sort)
+-- -- it used to build a fresh box, heading and checkbox row per entry on each of
+-- those and hide the old ones, so every redraw leaked the whole list. Each row now
+-- lives in f.rowCache under a key naming exactly what it shows (and, for a row,
+-- its label), so a redraw re-positions the one it already has. The get/set
+-- closures are bound at creation to that same identity, so reuse cannot point a
+-- checkbox at the wrong setting.
+local function cached(f, key)
+    local r = f.rowCache[key]
+    if r then tinsert(f.rows, r); r:Show() end
+    return r
+end
+
+local function addRow(f, parent, y, indent, label, get, set, expandable, expandedKey, key)
+    local r = cached(f, key)
+    if not r then
+        r = CreateFrame("Frame", nil, parent)
+        r:SetSize(f.listWidth, LIST_ROW)
+        r.cb = UI:CreateCheckbox(r, { label = label, get = get, set = set })
+        if expandable then
+            r.exp = UI:CreateGlyphButton(r, {
+                texture = UI.MEDIA .. "Icons\\expand_more",
+                size = 20, iconSize = 14,
+                onClick = function()
+                    f.expanded[expandedKey] = not f.expanded[expandedKey]
+                    St:Refresh()
+                end,
+            })
+            r.exp:SetPoint("RIGHT", -4, 0)
+        end
+        f.rowCache[key] = r
+        tinsert(f.rows, r)
+    else
+        r.cb:Refresh()
+    end
+    r:ClearAllPoints()
     r:SetPoint("TOPLEFT", 0, -y)
-    r.cb = UI:CreateCheckbox(r, { label = label, get = get, set = set })
     -- The checkbox factory's slot is taller than this row; anchor it so the
     -- check itself sits on the row's vertical centre.
+    r.cb:ClearAllPoints()
     r.cb:SetPoint("TOPLEFT", indent, CHECK_CONTENT_TOP + CHECK_CONTENT_H / 2 - LIST_ROW / 2)
     r.cb:SetWidth(f.listWidth - indent - (expandable and 28 or 8))
     if expandable then
-        r.exp = UI:CreateGlyphButton(r, {
-            texture = UI.MEDIA .. "Icons\\" .. (f.expanded[expandedKey] and "expand_less" or "expand_more"),
-            size = 20, iconSize = 14,
-            onClick = function()
-                f.expanded[expandedKey] = not f.expanded[expandedKey]
-                St:Refresh()
-            end,
-        })
-        r.exp:SetPoint("RIGHT", -4, 0)
+        r.exp:SetGlyph(UI.MEDIA .. "Icons\\" .. (f.expanded[expandedKey] and "expand_less" or "expand_more"))
     end
-    tinsert(f.rows, r)
     return r
 end
 
 -- A muted subheading naming the group the rows beneath it belong to. Not a
 -- toggle -- there is nothing to switch at group level, it only breaks the list up.
-local function addGroupHeading(f, parent, y, indent, text)
-    local r = CreateFrame("Frame", nil, parent)
+local function addGroupHeading(f, parent, y, indent, text, key)
+    local r = cached(f, key)
+    if not r then
+        r = CreateFrame("Frame", nil, parent)
+        r.txt = UI:CreateLabel(r, { text = text, size = 10, color = UI.Colors.textDim })
+        r.txt:SetPoint("LEFT", 0, 0)
+        f.rowCache[key] = r
+        tinsert(f.rows, r)
+    end
     r:SetSize(f.listWidth - indent, LIST_HEADING)
+    r:ClearAllPoints()
     r:SetPoint("TOPLEFT", indent, -y)
-    r.txt = UI:CreateLabel(r, { text = text, size = 10, color = UI.Colors.textDim })
-    r.txt:SetPoint("LEFT", 0, 0)
-    tinsert(f.rows, r)
     return r
 end
 
 -- One addon: its own element-backdrop box holding the addon row and, when
 -- expanded, the indented element rows.
 local function addAddonBox(f, y, name, info)
-    local box = CreateFrame("Frame", nil, f.content, "BackdropTemplate")
-    UI:CreateElementBackdrop(box)
+    local box = cached(f, "box\001" .. name)
+    if not box then
+        box = CreateFrame("Frame", nil, f.content, "BackdropTemplate")
+        UI:CreateElementBackdrop(box)
+        box:SetWidth(f.listWidth)
+        f.rowCache["box\001" .. name] = box
+        tinsert(f.rows, box)
+    end
+    box:ClearAllPoints()
     box:SetPoint("TOPLEFT", 0, -y)
-    box:SetWidth(f.listWidth)
     local inner = 0
     addRow(f, box, inner, 6, info.title,
         function() return addonDB(name).enabled ~= false end,
         function(v) Registry:SetEnabled(name, nil, v); rebuildProxies() end,
-        true, name)
+        true, name, "addon\001" .. name .. "\001" .. info.title)
     inner = inner + LIST_ROW
     if f.expanded[name] then
         -- Grouped so an addon that registers a dozen elements (DandersFrames does)
@@ -328,21 +475,22 @@ local function addAddonBox(f, y, name, info)
         for _, bucket in ipairs(Registry:GroupedElements(name)) do
             local indent = 6 + GAP
             if bucket.group then
-                addGroupHeading(f, box, inner, indent, bucket.group)
+                addGroupHeading(f, box, inner, indent, bucket.group,
+                    "group\001" .. name .. "\001" .. bucket.group)
                 inner = inner + LIST_HEADING
                 indent = indent + TIGHT
             end
             for _, el in ipairs(bucket.elements) do
+                local key = el.key
                 addRow(f, box, inner, indent, el.title,
-                    function() return addonDB(name).elements[el.key] ~= false end,
-                    function(v) Registry:SetEnabled(name, el.key, v); rebuildProxies() end,
-                    false)
+                    function() return addonDB(name).elements[key] ~= false end,
+                    function(v) Registry:SetEnabled(name, key, v); rebuildProxies() end,
+                    false, nil, "el\001" .. name .. "\001" .. key .. "\001" .. el.title)
                 inner = inner + LIST_ROW
             end
         end
     end
     box:SetHeight(inner)
-    tinsert(f.rows, box)
     return inner
 end
 
@@ -350,10 +498,8 @@ function St:Refresh()
     local f = self.frame
     if not f or not f:IsShown() then return end
     for _, cb in ipairs(f.cb) do cb:Refresh() end
-    f.gridSlider:RefreshValue()
-    f.snapDistSlider:RefreshValue()
-    f.zoneShowSlider:RefreshValue()
-    f.scaleSlider:RefreshValue()
+    for _, sl in ipairs(f.sliders) do sl:RefreshValue() end
+    if f.gateDim then f.gateDim() end
     f.sideRow:Refresh()
 
     clearRows(f)
@@ -362,11 +508,17 @@ function St:Refresh()
     tsort(names)
     local y = 0
     if #names == 0 then
-        local r = CreateFrame("Frame", nil, f.content)
-        r:SetSize(f.listWidth, LIST_ROW)
-        r.txt = UI:CreateLabel(r, { text = L["No addons have registered movers yet."], size = 10, color = UI.Colors.textDim })
-        r.txt:SetPoint("LEFT", 4, 0)
-        r:SetPoint("TOPLEFT", 0, 0); tinsert(f.rows, r); y = y + LIST_ROW
+        local r = cached(f, "empty")
+        if not r then
+            r = CreateFrame("Frame", nil, f.content)
+            r:SetSize(f.listWidth, LIST_ROW)
+            r.txt = UI:CreateLabel(r, { text = L["No addons have registered movers yet."], size = 10, color = UI.Colors.textDim })
+            r.txt:SetPoint("LEFT", 4, 0)
+            r:SetPoint("TOPLEFT", 0, 0)
+            f.rowCache.empty = r
+            tinsert(f.rows, r)
+        end
+        y = y + LIST_ROW
     end
     for _, name in ipairs(names) do
         y = y + addAddonBox(f, y, name, Registry.addons[name]) + TIGHT
@@ -400,7 +552,7 @@ NS.Lib.RegisterCallback(St, "Locked", function()
 end)
 
 function St:Show()
-    if not self.frame then self.frame = build() end
+    if not self.frame then self.frame = build() else relayout(self.frame) end
     self.sessionOwned = (Sess and Sess.IsActive and Sess:IsActive()) and true or false
     self.frame:Show()
     self:Refresh()
@@ -415,5 +567,8 @@ function St:Toggle() if self.frame and self.frame:IsShown() then self:Hide() els
 -- The Scale setting moved (its slider is in this very window): the window takes
 -- it too. Called by Proxy:ApplyChromeScale, which sizes everything else.
 function St:ApplyChromeScale()
-    if self.frame then self.frame:SetScale(chromeScale()) end
+    if not self.frame then return end
+    self.frame:SetScale(chromeScale())
+    -- The screen is a different width in the window's units now.
+    relayout(self.frame)
 end

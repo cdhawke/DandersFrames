@@ -925,10 +925,20 @@ do
     eq(groupBoxes, before, "pool: ...without a second build")
     a:Pin()
     local c = refresh("P:host")
-    check(c ~= a, "pool: once pinned, the next selection gets a new instance")
-    eq(groupBoxes, before + 1, "pool: ...and that one built")
+    check(c ~= a, "pool: once pinned, the next selection gets another instance")
+    -- recyclePinned: that instance is a closed pinned panel from earlier when
+    -- there is one, so at most ONE build here -- never one per pin.
+    check(groupBoxes <= before + 1, "pool: ...built at most once")
     check(a.closed, "pool: ...while the family evicted the pinned one")
     eq(#Pn.live, 1, "pool: one panel, always")
+
+    -- Pin, move on, repeat: auto-pin does exactly this on every edit. Each
+    -- evicted pin is recycled by the next selection, so the build count stops.
+    local settled = groupBoxes
+    local ids = { "P:free", "P:child", "P:host" }
+    for i = 1, 9 do refresh(ids[(i % 3) + 1]):Pin() end
+    check(groupBoxes <= settled + 1, "pool: nine pin-and-move-ons build at most one more panel")
+    eq(#Pn.live, 1, "pool: ...and still one panel up")
 end
 
 reset()
@@ -1138,6 +1148,31 @@ do
     refresh("P:host")
     check(not Pn:IsElementPinned("P:free"), "marker: selecting another mover evicts the pin")
     check(#highlights > before, "marker: ...and repaints for that too")
+end
+
+reset()
+
+-- ============================================================
+-- X/Y BOXES READ Solver.Readout -- the pair the slab's coords repeat
+-- (test_proxy.lua "COORDS READOUT"). The two used to be computed separately and
+-- disagreed: the slab quoted its visible centre, the boxes the record.
+-- ============================================================
+do
+    local S = NS.Solver
+    local saved = { point = freePos.point, x = freePos.x, y = freePos.y }
+    freePos.point, freePos.x, freePos.y = "TOPLEFT", -412.6, 180.4
+    local po = refresh("P:free")
+    local rx, ry = S.Readout(freePos)
+    eq(po.ui.xBox._opts.get(), rx, "readout: the X box shows Solver.Readout's x")
+    eq(po.ui.yBox._opts.get(), ry, "readout: the Y box shows Solver.Readout's y")
+    eq(rx, -413, "readout: ...the record's x, rounded half up")
+    eq(ry, 180, "readout: ...the record's y, rounded half up")
+    freePos.anchor = { target = "P:host", edge = "bottom", align = "start", offsetX = 5.5, offsetY = -3.4 }
+    Pn:Refresh()
+    eq(po.ui.xBox._opts.get(), 6, "readout: anchored, the X box shows the offset, rounded like the slab's")
+    eq(po.ui.yBox._opts.get(), -3, "readout: anchored, the Y box shows the offset, rounded like the slab's")
+    freePos.anchor = nil
+    freePos.point, freePos.x, freePos.y = saved.point, saved.x, saved.y
 end
 
 reset()

@@ -5,7 +5,9 @@ local addonName, NS = ...
 -- The public API lives on the LibStub object; internals live on NS.
 -- ============================================================
 -- MINOR 2 adds Lib:RefreshMovedTargets (see MOVED-TARGET SWEEP below).
-local MAJOR, MINOR = "DandersMover-1.0", 2
+-- MINOR 3 adds the optional def.visibleOffset (see RECORD-TO-VISIBLE OFFSET
+-- below), and slabs clamp the way elements do.
+local MAJOR, MINOR = "DandersMover-1.0", 3
 local Lib = LibStub:NewLibrary(MAJOR, MINOR)
 if not Lib then return end
 NS.Lib = Lib
@@ -24,8 +26,40 @@ NS.UI = LibStub("DandersUI-1.0"):NewHost("DandersMover", {
     -- Proxy.lua, which is why the call is guarded -- the hook is only ever
     -- invoked long after every file has loaded.
     getScale = function() return NS.ChromeScale and NS:ChromeScale() or 1 end,
+    -- Every tooltip the mover's chrome shows is placed by NS.TooltipAnchor below.
+    tooltipAnchor = function(owner) return NS.TooltipAnchor(owner) end,
 })
 NS.UI:SetAccent(0.18, 0.612, 0.792)   -- the mover's own blue, from the old Theme.C.accent
+
+-- ============================================================
+-- TOOLTIP PLACEMENT
+-- The kit's default tooltip sits up and to the right of the CURSOR. The mover's
+-- chrome lives along the top of the screen (the strip, and any panel docked to a
+-- slab up there), where there is no room above the cursor: the client clamps the
+-- tooltip back down and it lands right under the pointer, over the button being
+-- read. So anything in the upper half of the screen hangs its tooltip BELOW the
+-- control instead -- the cursor is inside the control, so a tooltip outside it
+-- can never be under the cursor. The lower half keeps the cursor default, which
+-- has the whole screen above it to grow into.
+--
+-- `beside` (the slabs) always places off the owner: a slab is the thing being
+-- looked at, so a cursor tooltip would sit on top of it.
+-- ============================================================
+local TIP_GAP = 4
+
+function NS.TooltipAnchor(owner, beside)
+    if not (owner and owner.GetCenter) then return nil end
+    local _, cy = owner:GetCenter()
+    local sh = UIParent:GetHeight()
+    if type(cy) ~= "number" or type(sh) ~= "number" then return nil end
+    -- GetCenter is in the owner's own units; bring it to UIParent's.
+    local oe = owner.GetEffectiveScale and owner:GetEffectiveScale()
+    local ue = UIParent:GetEffectiveScale()
+    if type(oe) == "number" and type(ue) == "number" and ue > 0 then cy = cy * oe / ue end
+    if cy > sh / 2 then return "ANCHOR_BOTTOM", 0, -TIP_GAP end
+    if beside then return "ANCHOR_TOP", 0, TIP_GAP end
+    return nil
+end
 
 local Registry, Solver = NS.Registry, NS.Solver
 local pairs, ipairs, type, pcall, xpcall, geterrorhandler = pairs, ipairs, type, pcall, xpcall, geterrorhandler
@@ -43,6 +77,11 @@ function NS:Debug(msg) if NS.db and NS.db.debug then print("|cff888888DandersMov
 -- ============================================================
 NS.DEFAULTS = {
     gridSize = 20, snapToGrid = true, snapToFrames = true, snapToScreen = true, showGrid = true,
+    -- Grid line width in DEVICE pixels (1-5; Grid.lua pixel-snaps it), and a
+    -- black wash over the game world while a session is open so the grid and
+    -- the frames stand out in bright zones. The dim is ON by default: the grid
+    -- lines are deliberately faint, and over a bright zone they vanished.
+    gridThickness = 1, dimBackground = true, dimAlpha = 0.4,
     -- How close (screen units, edge to edge) a dragged element has to get before a
     -- snap zone claims it. Fixed, not a fraction of the element: the same distance
     -- for a raid container and for a single icon. Also the zone-highlight radius.
@@ -53,10 +92,15 @@ NS.DEFAULTS = {
     -- being dragged.
     showMeasures = false, showSnapPreview = false,
     keyboardNudge = true, panelSide = "auto", showHiddenMovers = true, showOtherAddons = false, debug = false,
+    -- How solid a mover slab's FILL is (0.1-1). Only the fill: the outline, role
+    -- colour and text stay at full strength -- see slabFillAlpha in Proxy.lua.
+    -- 0.5, not the old 0.95: the frames under the movers have to stay readable.
+    moverOpacity = 0.5,
     -- Interacting with a mover's side panel pins it in place automatically; off = only the pin button pins.
     autoPinPanels = true,
     -- Size of the session chrome (top strip, element panel, toast, settings
-    -- window). Never the slabs -- see NS:ChromeScale in Proxy.lua.
+    -- window, and the text on the slabs). Never the slabs themselves -- see
+    -- NS:ChromeScale in Proxy.lua.
     scale = 1,
     stripCollapsed = false,               -- top strip folded to its slim tab
     addons = {}, demo = {},
@@ -144,10 +188,37 @@ function NS:ParentOf(id) return Registry:ParentId(id) end
 function NS.KeepOnScreen(cx, cy, w, h)
     local sw, sh = UIParent:GetWidth(), UIParent:GetHeight()
     if not (sw and sh and w and h) then return cx, cy end
-    if Solver.RectOverlapArea({ x = 0, y = 0, w = sw, h = sh }, { x = cx, y = cy, w = w, h = h }) > 0 then
-        return cx, cy
-    end
-    return Solver.ClampToScreen(cx, cy, w, h, sw, sh)
+    return Solver.KeepOnScreen(cx, cy, w, h, sw, sh)
+end
+
+-- ============================================================
+-- RECORD-TO-VISIBLE OFFSET
+-- ------------------------------------------------------------
+-- An element's getRect reports its VISIBLE rect, and that need not be centred
+-- on its record: DF's raid record places a container reserved for forty frames
+-- while its getRect measures the frames actually inside it. A drag copes
+-- (DragDelta moves the record by the visible movement), but an anchored solve
+-- writes the target VISIBLE centre into the record as a CENTER point -- which
+-- the consumer applies to its container, so the frames landed off their seat
+-- by exactly that offset.
+--
+-- def.visibleOffset(pos) -> dx, dy closes that: the visible centre sits at
+-- (pos.x + dx, pos.y + dy) for the record as given, in UIParent units. Only the
+-- consumer can answer it without a stale read, because it knows how its own
+-- container relates to the record. nil (no callback, or the callback returns
+-- nil) keeps the plain CENTER write, which is right for any element whose
+-- frame IS its visible rect.
+-- ============================================================
+local OFFSET_EPSILON = 0.01
+
+-- dx, dy or nil. Guarded: a consumer error must not take the solve down with it.
+function NS.VisibleOffset(el, pos)
+    local fn = el.visibleOffset
+    if not fn then return nil end
+    local ok, dx, dy = pcall(fn, pos)
+    if not ok then geterrorhandler()(dx) return nil end
+    if type(dx) ~= "number" or type(dy) ~= "number" then return nil end
+    return dx, dy
 end
 
 -- Re-solves an anchored element's absolute x/y from its target's current rect.
@@ -168,6 +239,19 @@ function NS:ResolveElement(el)
     local cx, cy = Solver.Resolve(a, w, h, rect, Solver.SPACING)
     if not cx then return false end
     cx, cy = NS.KeepOnScreen(cx, cy, w, h)
+    -- cx/cy is where the VISIBLE centre belongs; see RECORD-TO-VISIBLE OFFSET.
+    local offX, offY = NS.VisibleOffset(el, pos)
+    if offX then
+        local nx, ny = cx - offX, cy - offY
+        -- The offset is measured from live geometry, so an exact compare would
+        -- report sub-pixel float noise as a move on every solve. The record's
+        -- point is kept: the offset was asked for THAT point.
+        if abs(nx - (pos.x or 0)) < OFFSET_EPSILON and abs(ny - (pos.y or 0)) < OFFSET_EPSILON then
+            return false
+        end
+        pos.x, pos.y = nx, ny
+        return true
+    end
     local changed = pos.point ~= "CENTER" or pos.x ~= cx or pos.y ~= cy
     pos.point, pos.x, pos.y = "CENTER", cx, cy
     return changed

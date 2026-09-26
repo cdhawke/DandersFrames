@@ -175,8 +175,14 @@ do
           "harness: the page registration passes Add and AddSpace through")
     check(EDIT:find("function DF.BuildAuraDesignerPage(guiRef, pageRef, dbRef, Add, AddSpace)", 1, true) ~= nil,
           "harness: ...and the entry point takes them")
-    check(EDIT:find("if Add and P.BuildAuraDesignerRowsPage and not DF:IsClassicSettingsLayout() then", 1, true) ~= nil,
-          "harness: the popout arm needs Add AND a non-classic layout")
+    check(EDIT:find("if Add and P.BuildAuraDesignerRowsPage and DF:DesignersUseRows() and not DF:IsClassicSettingsLayout() then", 1, true) ~= nil,
+          "harness: the popout arm needs Add, the designer switch AND a non-classic layout")
+    -- 2026-09-22: the designers build their CLASSIC version in both layouts.
+    local CFG = df_file_source("Core/Config.lua")
+    local s = CFG:find("function DF:DesignersUseRows()", 1, true)
+    local body = s and CFG:sub(s, (CFG:find("end", s, true) or s) + 2) or ""
+    check(s ~= nil and body:find("return false", 1, true) ~= nil,
+          "harness: the designer switch is off, so the classic designer builds in both layouts")
     check(EDIT:find("local function BuildAuraDesignerIsland(guiRef, pageRef, dbRef)", 1, true) ~= nil,
           "harness: ...and the split panel survives as classic's arm")
 
@@ -787,11 +793,33 @@ do
               "addgroup: ...and shuts itself before the rebuild that retires its row")
     end
 
-    -- The split panel keeps its block: it is the one surface with standing room.
-    check(EDIT:find([[title    = L["ADD A LAYOUT GROUP"],]], 1, true) ~= nil,
-          "addgroup: the split panel still draws its card block")
-    check(EDIT:find([[title    = L["ADD A DEBUFF GROUP"],]], 1, true) ~= nil,
-          "addgroup: ...on both pools")
+    -- ☠ THE SPLIT PANEL'S CARD BLOCKS ARE GONE (2026-09-22). It mounts these same
+    -- two panes ON its tabs now (opts.onPage), and a tile click adds -- see
+    -- test_designers_classic.lua for the mount, run.
+    check(EDIT:find([[title    = L["ADD A LAYOUT GROUP"],]], 1, true) == nil,
+          "addgroup: the split panel no longer draws its Layout Groups card block")
+    check(EDIT:find([[title    = L["ADD A DEBUFF GROUP"],]], 1, true) == nil,
+          "addgroup: ...nor the Debuffs one")
+    local EDITN = EDIT:gsub("\r\n", "\n")
+    -- ☠ NO CONFIRM STEP. The first pass drew the chosen kind with an Add button
+    -- under it; one click on the tile is the add now.
+    check(EDITN:find("BuildChosenGroupPane", 1, true) == nil,
+          "addgroup: the chosen-kind pane with its Add button is gone")
+    check(EDITN:find("opts.kind", 1, true) == nil,
+          "addgroup: ...and nothing asks for it by opts.kind")
+    for _, fn in ipairs({ "S.BuildAddLayoutGroupPane", "S.BuildAddDebuffGroupPane" }) do
+        local b = EDITN:match(fn:gsub("%.", "%%.") .. " = function%(host, opts%)(.-)\nend\n") or ""
+        -- opts.onPage drops the numbered question; the rows page still gets it.
+        check(b:find("    if not opts.onPage then\n        CreateNumberedHeading(host, 1, L[\"WHICH KIND OF GROUP?\"], y, W)", 1, true) ~= nil,
+              "addgroup: " .. fn .. " asks its question only off the page")
+        -- The classic gate is asked on the click, before the pane closes or adds.
+        local gAt = b:find("if opts.gate and not opts.gate() then return end", 1, true)
+        local cAt = b:find("if opts.Close then opts.Close() end", 1, true)
+        check(gAt and cAt and gAt < cAt,
+              "addgroup: " .. fn .. " asks the classic gate before anything happens")
+        check(b:find('if opts.blocked then tile:SetTileState("disabled") end', 1, true) ~= nil,
+              "addgroup: " .. fn .. " greys its tiles when the add is blocked")
+    end
 
     -- The order the Effects tab already draws: add, then the list.
     local addAt  = BODY:find("local addBand = GUI:CreateSettingsGroup", 1, true)
@@ -1432,7 +1460,9 @@ do
     -- The split panel's own strip survives, untouched, for its ONE host.
     check(ROWS:find("S.BuildPoolStrip = function(buffTabBar)", 1, true) ~= nil,
           "pool: the split panel's pool strip is declared once")
-    check(EDIT:find("S.BuildPoolStrip(buffTabBar)", 1, true) ~= nil,
+    -- (poolHost: the strip's left part -- the spec picker holds its right end,
+    -- see test_designers_classic.lua.)
+    check(EDIT:find("S.BuildPoolStrip(poolHost)", 1, true) ~= nil,
           "pool: ...and the split panel mounts it into its own slice")
     -- ☠ THE ABSENCE IS THE ASSERTION: the band layout has its own strip and must
     -- not also mount the split panel's, which is anchored inside S.mainFrame.
@@ -2004,17 +2034,14 @@ do
           "narrow: ...reporting THAT height, not the constant, to whatever stacks it")
     check(SW:find("card.layoutHeight = CHOICE_CARD_H", 1, true) == nil,
           "narrow: ...and the constant is no longer what a caller advances by")
-    -- (X) THE TWO SITES SPELL IT DIFFERENTLY, AND THE TEST HAS TO. The add
-    -- block's table is aligned ("width    = COL_W") and the picker arm's card is
-    -- not ("width = COL_W"), so a search for the shorter string is satisfied by
-    -- the card and says nothing at all about the block. My first version passed
-    -- with the block's width deleted.
-    check(HEAD:find("width    = COL_W,", 1, true) ~= nil,
-          "narrow: the Effects tab's add block passes that width down")
-    check(HEAD:find("width = COL_W,", 1, true) ~= nil,
-          "narrow: ...and so does the picker arm's own card list")
-    check(EDIT:find("width    = COL_W", 1, true) ~= nil,
-          "narrow: ...and so do the two Layout Groups blocks")
+    -- ☠ NO CHOICE-CARD BLOCK IS LEFT IN EITHER DESIGNER HEAD AREA (2026-09-22):
+    -- the split panel's add blocks became one button each, opening the Modern
+    -- panes in a popout. The width rule above still holds for the kit's cards;
+    -- the head areas simply no longer build any.
+    check(HEAD:find("CreateChoiceCard", 1, true) == nil,
+          "narrow: the Effects head area builds no choice cards any more")
+    check(EDIT:find("GUI:CreateChoiceCardGroup(parent", 1, true) == nil,
+          "narrow: ...and neither do the two Layout Groups head areas")
 
     -- ---- class two: the preset bar --------------------------------------
     -- Caption + a fixed 150px dropdown + four action buttons, chained left to
@@ -2152,7 +2179,8 @@ do
     -- click would leak nine miniature frames per click.
     check(pane:find("tile:SetTileState(state)", 1, true) ~= nil,
           "add: a click changes each tile's STATE")
-    check(pane:find("CreateFrameTile(host, {", 1, true) ~= nil,
+    -- (Onto the host, or onto the one block opts.inline dims as a whole.)
+    check(pane:find("CreateFrameTile(tileParent, {", 1, true) ~= nil,
           "add: ...on tiles built once, in the builder")
     check(pane:find("if opts.SetHeight then opts.SetHeight(paneH) end", 1, true) ~= nil,
           "add: ...and the pane reports its height instead of assuming one")
@@ -2204,17 +2232,10 @@ do
     check(applyAt and readyAt and applyAt > readyAt,
           "add: the remembered height is applied AFTER the flag is armed")
 
-    -- ☠ TWO LISTS, EACH WITH ONE READER. The split panel still asks the scope
-    -- question, so AddFlowScopes stays and is ITS list; the panel's list is FLAT
-    -- and is the only thing the panel reads. Both are verbs, so neither freezes on
-    -- whatever locale was live at load.
-    check(CARDS:find("local function AddFlowScopes()", 1, true) ~= nil,
-          "add: the scopes and their type lists are declared once")
-    check(CARDS:find("local SCOPES = AddFlowScopes()", 1, true) ~= nil,
-          "add: ...and read as a verb, so the labels are not frozen on enUS")
-    local scopeReads = 0
-    for _ in CARDS:gmatch("AddFlowScopes%(%)") do scopeReads = scopeReads + 1 end
-    eq(scopeReads, 2, "add: ...by the split panel's block alone, now the panel is flat")
+    -- ☠ ONE LIST, ONE READER. The split panel asked the scope question until
+    -- 2026-09-22; it opens this panel now, so the scope lists went with the block.
+    check(CARDS:find("AddFlowScopes", 1, true) == nil,
+          "add: the three scope lists are gone with the split panel's block")
     check(CARDS:find("local function AddFlowEffects()", 1, true) ~= nil,
           "add: the panel's own list is flat and declared once")
     check(CARDS:find("local EFFECTS = AddFlowEffects()", 1, true) ~= nil,
@@ -2254,14 +2275,48 @@ do
     check(pane:find('DF:Say(L["Already added."])', 1, true) ~= nil,
           "add: a duplicate is refused out loud on the type card")
 
-    -- ...and the page it came off no longer draws the block at all.
-    check(CARDS:find("if S.effectsPicker and not skipAdd then", 1, true) ~= nil,
-          "add: the row layout never enters the split panel's picker column")
+    -- ...and neither designer draws the block at all: the split panel's picker
+    -- column is gone, and the row layout still asks the head area for no add UI.
+    check(CARDS:find("effectsPicker", 1, true) == nil,
+          "add: the split panel's picker column is gone")
     local headBody = CARDS:match("S%.BuildEffectsHeadArea = function%(parent, yPos, opts%)(.-)\nend\n")
     check(headBody ~= nil, "add: the head area's body can be read")
     headBody = headBody or ""
-    check(headBody:find("if not skipAdd then", 1, true) ~= nil,
-          "add: ...and the pinned block is behind that same switch")
+    check(headBody:find("elseif not skipAdd then", 1, true) ~= nil,
+          "add: ...and the classic add buttons are behind that same switch")
+
+    -- ☠ THE CLASSIC DESIGNER RUNS THIS PANE INSIDE ITS TAB (2026-09-22), never in a
+    -- popout: two picture tiles, Add from a Spell / Add from a Filter, each handing
+    -- the pane the route it chose. The flow is run in test_designers_classic.lua;
+    -- here the wiring is read.
+    local defsBody = CARDS:match("S%.ClassicAddSourceDefs = function%(%)(.-)\nend\n") or ""
+    check(defsBody:find('{ source = "spell",  label = L["Add from a Spell"]', 1, true) ~= nil,
+          "add: the classic Effects tab has an Add from a Spell tile")
+    check(defsBody:find('{ source = "filter", label = L["Add from a Filter"]', 1, true) ~= nil,
+          "add: ...and an Add from a Filter tile")
+    check(defsBody:find('L["Add Indicator"]', 1, true) == nil,
+          "add: ...instead of one Add Indicator button")
+    local flowBody = CARDS:match("S%.BuildClassicAddFlow = function%(parent, kind%)(.-)\nend\n") or ""
+    check(flowBody:find("source = flow.source, fitWidth = true, restore = restore,", 1, true) ~= nil,
+          "add: ...each entering the pane with its route chosen, laid out for the tab")
+    check(flowBody:find("inline = true,", 1, true) ~= nil,
+          "add: ...as the inline pane, which says its states and follows its own height")
+    check(flowBody:find('L["Back to Effects"]', 1, true) ~= nil,
+          "add: ...headed by Back to Effects")
+    check(flowBody:find("back:SetScript(\"OnClick\", function() S.EndClassicAddFlow(true, kind) end)", 1, true) ~= nil,
+          "add: ...which ends the flow and rebuilds the list")
+    check(CARDS:find('"df.adadd.', 1, true) == nil and CARDS:find("S.OpenClassicAddPopout", 1, true) == nil,
+          "add: ...and no popout hosts it any more")
+    -- The pane's opt-ins, each behind its own opts field.
+    check(pane:find('local srcOnly = (opts.source == "spell" or opts.source == "filter") and opts.source or nil', 1, true) ~= nil,
+          "add: the pane takes a chosen route only when handed one")
+    check(pane:find("if srcOnly ~= \"filter\" then\n        spellBtn = CreateFrame", 1, true) ~= nil
+          and pane:find("if srcOnly ~= \"spell\" then\n        filterBtn = CreateFrame", 1, true) ~= nil,
+          "add: ...and then builds that route's button only")
+    check(pane:find("if opts.fitWidth then", 1, true) ~= nil,
+          "add: the tile columns widen only for a host that asks")
+    check(pane:find("Snapshot = function()", 1, true) ~= nil,
+          "add: the pane hands out its answers for a rebuild")
 end
 
 print("-- Aura Designer: Preview Scale is a glyph, not a row across the canvas")

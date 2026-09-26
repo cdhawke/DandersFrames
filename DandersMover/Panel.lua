@@ -709,8 +709,9 @@ local function buildPanel(po, content)
         width = BOX_W, numeric = true,
         get = function()
             local el = po.el; if not el then return 0 end
-            local pos = Registry:GetPos(el)
-            return pos.anchor and (pos.anchor.offsetX or 0) or floor((pos.x or 0) + 0.5)
+            -- Solver.Readout: the same pair the slab's coords readout quotes.
+            local x = Solver.Readout(Registry:GetPos(el))
+            return x
         end,
         onCommit = function(v)
             local el = po.el
@@ -724,8 +725,8 @@ local function buildPanel(po, content)
         width = BOX_W, numeric = true,
         get = function()
             local el = po.el; if not el then return 0 end
-            local pos = Registry:GetPos(el)
-            return pos.anchor and (pos.anchor.offsetY or 0) or floor((pos.y or 0) + 0.5)
+            local _, y = Solver.Readout(Registry:GetPos(el))
+            return y
         end,
         onCommit = function(v)
             local el = po.el
@@ -1097,6 +1098,11 @@ function Pn:Create()
         width = CW,
         build = buildPanel,
         canAutoPin = function() return NS.db.autoPinPanels end,
+        -- Auto-pin fires on every edit and the family sweep closes that pin on
+        -- the next selection, so without this each edited element left a whole
+        -- panel of frames behind for good. OnClose drops a closed panel from
+        -- `live` and holds no other reference, so a revived one is safe here.
+        recyclePinned = true,
         -- The beam's far end is this panel's OWN mover, which after a pin is not
         -- what it is docked to (it is docked to nothing) and not the selection.
         tetherSource = function(p) return p.elId and Proxy.proxies[p.elId] or nil end,
