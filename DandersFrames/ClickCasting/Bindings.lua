@@ -2675,6 +2675,18 @@ function CC:ResolveColdStartProfile(reason)
     end)
 end
 
+-- WoW Forever: "/cast [@mouseover] Name(Rank N)" casts the right rank but
+-- loses the frame's unit, so a lone pinned-rank spell on a key casts by ID on
+-- the frame's unit instead of through the macro.
+local function GetPinnedSpellId(group)
+    if #group ~= 1 then return nil end
+    local b = group[1].binding
+    if not b.pinRank or not b.spellId or GetCombatCondition(b) then return nil end
+    if (b.actionType or CC.ACTION_TYPES.SPELL) ~= CC.ACTION_TYPES.SPELL then return nil end
+    if b.targetType == "hostile" then return nil end
+    return b.spellId
+end
+
 function CC:BuildUnifiedMacroMap()
     local macroMap = {}
 
@@ -2775,6 +2787,7 @@ function CC:BuildUnifiedMacroMap()
                     globalMacroText = globalMacroText,
                     templateBinding = templateBinding,
                     keyString = keyString,
+                    pinSpellId = GetPinnedSpellId(group),
                 }
                 
                 DF:Debug("CLICK", "Macro: %s\n%s", tostring(keyString), tostring(macroText))
@@ -2883,6 +2896,14 @@ end
 --     menu/target use attribute drivers (AddCombatConditional).
 function CC:ApplyActionToSlot(frame, slot, ctx)
     local actionType = ctx.actionType
+    if ctx.pinSpellId then
+        WriteTypeAttr(frame, slot.typeAttr, "spell")
+        WriteAttr(frame, slot.typeAttr:gsub("type", "spell", 1), ctx.pinSpellId)
+        if slot.isVirtual then
+            WriteAttr(frame, slot.unitAttr, "mouseover")
+        end
+        return
+    end
     if not ctx.isSpecialAction then
         WriteTypeAttr(frame, slot.typeAttr, "macro")
         WriteAttr(frame, slot.macroAttr, ctx.macroText)
@@ -3063,6 +3084,7 @@ function CC:ApplyBindingsToFrameUnified(frame, skipKeyboardUpdate, quiet)
             ctx.actionType = actionType
             ctx.isSpecialAction = isSpecialAction
             ctx.macroText = data.macroText
+            ctx.pinSpellId = data.pinSpellId
             ctx.combatCond = GetCombatCondition(binding)
             ctx.useProxy = useProxy
             ctx.plainLeftClick = nil
