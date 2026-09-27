@@ -279,6 +279,19 @@ DF.AuraDesigner.SelfOnlySpellIDs = {
 -- to the same aura name.
 -- ============================================================
 DF.AuraDesigner.AlternateSpellIDs = {
+    HolyPriest = {
+        -- WoW Forever: every classic rank is its own aura ID
+        [6074] = "Renew", [6075] = "Renew", [6076] = "Renew", [6077] = "Renew", [6078] = "Renew", [10927] = "Renew", [10928] = "Renew", [10929] = "Renew", [25315] = "Renew",
+    },
+    DisciplinePriest = {
+        -- WoW Forever: every classic rank is its own aura ID
+        [592] = "PowerWordShield", [600] = "PowerWordShield", [3747] = "PowerWordShield", [6065] = "PowerWordShield", [6066] = "PowerWordShield", [10898] = "PowerWordShield", [10899] = "PowerWordShield", [10900] = "PowerWordShield", [10901] = "PowerWordShield",
+    },
+    RestorationDruid = {
+        -- WoW Forever: every classic rank is its own aura ID
+        [1058] = "Rejuvenation", [1430] = "Rejuvenation", [2090] = "Rejuvenation", [2091] = "Rejuvenation", [3627] = "Rejuvenation", [8910] = "Rejuvenation", [9839] = "Rejuvenation", [9840] = "Rejuvenation", [9841] = "Rejuvenation", [25299] = "Rejuvenation",
+        [8938] = "Regrowth", [8939] = "Regrowth", [8940] = "Regrowth", [8941] = "Regrowth", [9750] = "Regrowth", [9856] = "Regrowth", [9857] = "Regrowth", [9858] = "Regrowth",
+    },
     RestorationShaman = {
         [974] = "EarthShield",  -- alternate ID for Earth Shield (primary is 383648)
         [382021] = "EarthlivingWeapon",  -- alternate ID (primary is 382024)
